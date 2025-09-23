@@ -2,6 +2,10 @@
 
 <robot name="gen3_2f_85_pick_place" xmlns:xacro="http://ros.org/wiki/xacro">
 
+  <!-- arguments -->
+  <xacro:arg name="use_fake_hardware" default="false" />
+  <xacro:arg name="fake_sensor_commands" default="false" />
+
   <xacro:property name="PI" value="3.14159265359" />
 
   <xacro:property name="prefix" value="kinova_" />
@@ -10,7 +14,7 @@
   <xacro:property name="arm" value="gen3" />
   <xacro:property name="dof" value="7" />
   <xacro:property name="gripper" value="robotiq_2f_85" />
-  <xacro:property name="gripper_joint_name" default="finger_joint" />
+  <xacro:property name="gripper_joint_name" default="" />
   <xacro:property name="robot_ip" default="192.168.0.11" />
   <xacro:property name="username" default="admin" />
   <xacro:property name="password" default="admin" />
@@ -94,6 +98,8 @@
     prefix="${prefix}"
     parent="${prefix}table_mount"
     vision="true"
+    use_fake_hardware="$(arg use_fake_hardware)"
+    fake_sensor_commands="$(arg fake_sensor_commands)"
     robot_ip="${robot_ip}"
     username="${username}"
     password="${password}"
