@@ -1,0 +1,121 @@
+<?xml version="1.0"?>
+
+<robot name="gen3_2f_85_pick_place" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <xacro:property name="PI" value="3.14159265359" />
+
+  <xacro:property name="prefix" value="kinova_" />
+
+  <!-- parameters -->
+  <xacro:property name="arm" value="gen3" />
+  <xacro:property name="dof" value="7" />
+  <xacro:property name="gripper" value="robotiq_2f_85" />
+  <xacro:property name="gripper_joint_name" default="finger_joint" />
+  <xacro:property name="robot_ip" default="192.168.0.11" />
+  <xacro:property name="username" default="admin" />
+  <xacro:property name="password" default="admin" />
+  <xacro:property name="port" default="10000" />
+  <xacro:property name="port_realtime" default="10001" />
+  <xacro:property name="session_inactivity_timeout_ms" default="60000" />
+  <xacro:property name="connection_inactivity_timeout_ms" default="2000" />
+  
+  <!-- table parameters -->
+  <xacro:property name="table_prefix" value="table" />
+  <xacro:property name="table_leg_height" value="0.67" />
+  <xacro:property name="table_leg_length" value="0.05" />
+  <xacro:property name="table_leg_breadth" value="0.05" />
+  <xacro:property name="table_top_thickness" value="0.07" />
+  <xacro:property name="table_top_length" value="1.6" />
+  <xacro:property name="table_top_breadth" value="0.8" />
+
+  <material name="wood_color">
+    <color rgba="0.8 0.6 0.4 1.0"/>
+  </material>
+
+  <xacro:property name="material_wood_color" value="wood_color" />
+
+  <!-- includes -->
+  <xacro:include filename="$(find kortex_description)/robots/kortex_robot.xacro" />
+  <xacro:include filename="$(find kinova_apps)/urdf/table.xacro" />
+
+  <!-- world -->
+  <link name="world"/>
+
+  <!-- table -->
+  <xacro:table prefix="${table_prefix}"
+    parent="world"
+    leg_height="${table_leg_height}"
+    leg_length="${table_leg_length}"
+    leg_breadth="${table_leg_breadth}"
+    top_thickness="${table_top_thickness}"
+    top_length="${table_top_length}"
+    top_breadth="${table_top_breadth}"
+    top_material="${material_wood_color}" >
+
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:table>
+
+  <!-- kinova table mount -->
+  <link name="${prefix}table_mount">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.026" radius="0.08"/>
+      </geometry>
+      <material name="grey">
+        <color rgba="0.5 0.5 0.5 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.026" radius="0.08"/>
+      </geometry>
+    </collision>
+  </link>
+  
+  <!-- robot origin wrt table top center -->
+  <xacro:property name="mount_origin_x" value="0.0" />
+  <xacro:property name="mount_origin_y" value="-${table_top_breadth/2 - 0.08}" />
+  <xacro:property name="mount_origin_z" value="0.013" />
+  <xacro:property name="robot_origin_yaw" value="${PI/2}" />
+
+  <joint name="${prefix}table_mount_joint" type="fixed">
+    <parent link="${table_prefix}_top"/>
+    <child link="${prefix}table_mount"/>
+    <origin xyz="${mount_origin_x} ${mount_origin_y} ${mount_origin_z}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- robot -->
+  <xacro:load_robot
+    arm="${arm}"
+    dof="${dof}"
+    gripper="${gripper}"
+    prefix="${prefix}"
+    parent="${prefix}table_mount"
+    vision="true"
+    robot_ip="${robot_ip}"
+    username="${username}"
+    password="${password}"
+    port="${port}"
+    port_realtime="${port_realtime}"
+    session_inactivity_timeout_ms="${session_inactivity_timeout_ms}"
+    connection_inactivity_timeout_ms="${connection_inactivity_timeout_ms}"
+    gripper_joint_name="${gripper_joint_name}">
+    <origin xyz="0 0 ${0.026/2}" rpy="0 0 ${robot_origin_yaw}"/>
+  </xacro:load_robot>
+
+  <!-- robotiq 2f-85 length parameters -->
+  <xacro:property name="robotiq_85_base_tip_open_length" value="0.1489" />
+  <xacro:property name="robotiq_85_base_tip_closed_length" value="0.1628" />
+
+  <!-- robotiq 2f-85 grasp link -->
+  <link name="${prefix}robotiq_85_grasp_link" />
+  <joint name="${prefix}robotiq_85_grasp_joint" type="fixed">
+    <parent link="${prefix}robotiq_85_base_link"/>
+    <child link="${prefix}robotiq_85_grasp_link"/>
+    <origin rpy="0 0 0" xyz="0 0 ${robotiq_85_base_tip_open_length}"/>
+  </joint>
+
+
+</robot>

@@ -1,0 +1,102 @@
+<?xml version="1.0"?>
+<robot name="table" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <!-- Table macro -->
+  <xacro:macro name="table" params="
+      prefix
+      parent
+      leg_height
+      leg_length
+      leg_breadth
+      top_thickness
+      top_length
+      top_breadth
+      top_material
+      *origin
+    ">
+
+    <!-- Base link at table center on ground -->
+    <link name="${prefix}_base">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <sphere radius="0.01"/> <!-- tiny marker sphere -->
+        </geometry>
+        <material name="invisible">
+          <color rgba="0 0 0 0"/>
+        </material>
+      </visual>
+    </link>
+
+    <!-- Table top -->
+    <link name="${prefix}_top">
+      <visual>
+        <origin xyz="0 0 -${top_thickness/2}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${top_length} ${top_breadth} ${top_thickness}"/>
+        </geometry>
+        <material name="${top_material}"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 -${top_thickness/2}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${top_length} ${top_breadth} ${top_thickness}"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="${prefix}_top_joint" type="fixed">
+      <parent link="${prefix}_base"/>
+      <child link="${prefix}_top"/>
+      <origin xyz="0 0 ${leg_height + top_thickness}" rpy="0 0 0"/>
+    </joint>
+
+    <!-- Leg offsets -->
+    <xacro:property name="leg_x" value="${top_length/2 - leg_length/2}"/>
+    <xacro:property name="leg_y" value="${top_breadth/2 - leg_breadth/2}"/>
+
+    <!-- Macro for each leg -->
+    <xacro:macro name="table_leg" params="prefix leg_name x y leg_height leg_length leg_breadth">
+      <link name="${prefix}_${leg_name}">
+        <visual>
+          <origin xyz="0 0 ${-leg_height/2}" rpy="0 0 0"/>
+          <geometry>
+            <box size="${leg_length} ${leg_breadth} ${leg_height}"/>
+          </geometry>
+          <material name="grey">
+            <color rgba="0.5 0.5 0.5 1.0"/>
+          </material>
+        </visual>
+        <collision>
+          <origin xyz="0 0 ${-leg_height/2}" rpy="0 0 0"/>
+          <geometry>
+            <box size="${leg_length} ${leg_breadth} ${leg_height}"/>
+          </geometry>
+        </collision>
+      </link>
+
+      <!-- Joint placed at leg top -->
+      <joint name="${prefix}_${leg_name}_joint" type="fixed">
+        <parent link="${prefix}_base"/>
+        <child link="${prefix}_${leg_name}"/>
+        <origin xyz="${x} ${y} ${leg_height}" rpy="0 0 0"/>
+      </joint>
+    </xacro:macro>
+
+    <!-- Four legs -->
+    <xacro:table_leg prefix="${prefix}" leg_name="leg_fl" x="${ leg_x}"  y="${ leg_y}"  leg_height="${leg_height}" leg_length="${leg_length}" leg_breadth="${leg_breadth}"/>
+    <xacro:table_leg prefix="${prefix}" leg_name="leg_fr" x="${ leg_x}"  y="${-leg_y}" leg_height="${leg_height}" leg_length="${leg_length}" leg_breadth="${leg_breadth}"/>
+    <xacro:table_leg prefix="${prefix}" leg_name="leg_bl" x="${-leg_x}" y="${ leg_y}"  leg_height="${leg_height}" leg_length="${leg_length}" leg_breadth="${leg_breadth}"/>
+    <xacro:table_leg prefix="${prefix}" leg_name="leg_br" x="${-leg_x}" y="${-leg_y}" leg_height="${leg_height}" leg_length="${leg_length}" leg_breadth="${leg_breadth}"/>
+
+    <!-- Attach base to parent -->
+    <joint name="${prefix}_fixed" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${prefix}_base"/>
+      <xacro:insert_block name="origin"/>
+    </joint>
+
+  </xacro:macro>
+
+</robot>
+
