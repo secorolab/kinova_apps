@@ -27,6 +27,7 @@ setup(
         'console_scripts': [
             'sort_objects = kinova_apps.sort_objects:main',
             'image_util_node = kinova_apps.scripts.image_util_node:main',
+            'pc_util_node = kinova_apps.scripts.pc_utils:main',
             'hsv_calib = kinova_apps.scripts.hsv_calib:main',
         ],
     },
