@@ -6,13 +6,16 @@ def generate_launch_description():
 
     sl = SimpleLauncher()
 
-    sl.declare_arg('xacro_file', default_value='pick_place.xacro', description='Path to the xacro file to load')
+    sl.declare_arg('xacro_file', 'pick_place.xacro', description='Path to the xacro file to load')
+    sl.declare_arg('joint_state_gui', 'true', description='Enable joint state publisher GUI')
 
-    # Launch the robot state publisher with the xacro file
-    sl.robot_state_publisher('kinova_apps', sl.arg('xacro_file'), 'urdf')
+    # laod env
+    sl.include('kinova_apps', 'load_env.launch.py', launch_arguments={
+        'xacro_file': sl.arg('xacro_file'),
+    })
 
     # joint state publisher
-    sl.joint_state_publisher(use_gui=True)
+    sl.joint_state_publisher(use_gui=sl.arg('joint_state_gui'))
 
     # Launch RViz2 with a predefined configuration file
     rviz_config_file = get_package_share_directory('kinova_apps') + '/config/view_env.rviz'

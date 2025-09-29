@@ -5,6 +5,8 @@
   <!-- arguments -->
   <xacro:arg name="use_fake_hardware" default="false" />
   <xacro:arg name="fake_sensor_commands" default="false" />
+  <xacro:arg name="robot_ip" default="" />
+  <xacro:arg name="gripper_joint_name" default="" />
 
   <xacro:property name="PI" value="3.14159265359" />
 
@@ -14,8 +16,6 @@
   <xacro:property name="arm" value="gen3" />
   <xacro:property name="dof" value="7" />
   <xacro:property name="gripper" value="robotiq_2f_85" />
-  <xacro:property name="gripper_joint_name" default="" />
-  <xacro:property name="robot_ip" default="192.168.0.11" />
   <xacro:property name="username" default="admin" />
   <xacro:property name="password" default="admin" />
   <xacro:property name="port" default="10000" />
@@ -100,14 +100,15 @@
     vision="true"
     use_fake_hardware="$(arg use_fake_hardware)"
     fake_sensor_commands="$(arg fake_sensor_commands)"
-    robot_ip="${robot_ip}"
+    robot_ip="$(arg robot_ip)"
     username="${username}"
     password="${password}"
     port="${port}"
     port_realtime="${port_realtime}"
     session_inactivity_timeout_ms="${session_inactivity_timeout_ms}"
     connection_inactivity_timeout_ms="${connection_inactivity_timeout_ms}"
-    gripper_joint_name="${gripper_joint_name}">
+    gripper_joint_name="$(arg gripper_joint_name)"
+    use_internal_bus_gripper_comm="true">
     <origin xyz="0 0 ${0.026/2}" rpy="0 0 ${robot_origin_yaw}"/>
   </xacro:load_robot>
 
