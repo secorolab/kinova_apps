@@ -1,16 +1,16 @@
 import numpy as np
 import open3d as o3d
-import cv2
-from cv_bridge import CvBridge
-
-from sklearn.cluster import KMeans
 from scipy.cluster.hierarchy import linkage, fcluster
 
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 
-from pydantic import BaseModel
+from kinova_apps.scripts.models import ObjectClass, ClusterInfo, ClusterParams, CubeSphereParams, ColorLabel
+
+from sklearn.cluster import KMeans
+
+import cv2
 
 
 def o3dpc_to_ros(pc: o3d.geometry.PointCloud, frame_id: str, stamp=None) -> PointCloud2:
@@ -54,28 +54,9 @@ def o3dpc_to_ros(pc: o3d.geometry.PointCloud, frame_id: str, stamp=None) -> Poin
     return pc2_msg
 
 
-class PlaneSegParams(BaseModel):
-    plane_dist_thresh: float = 0.01
-    ransac_n: int = 5
-    num_iters: int = 1000
-
-
-class DBSCANParams(BaseModel):
-    eps: float = 0.02
-    min_points: int = 10
-
-
-class ClusterParams(BaseModel):
-    voxel_size: float = 0.001
-    plane_seg: PlaneSegParams = PlaneSegParams()
-    dbscan: DBSCANParams = DBSCANParams()
-    outlier_percentiles: tuple = (5, 90)
-    fcluster_thresh: float = 1000.0
-
-
 def cluster_pc(
     pc: np.ndarray, params: ClusterParams = ClusterParams()
-) -> tuple[o3d.geometry.PointCloud, o3d.geometry.PointCloud, list[dict]]:
+) -> tuple[o3d.geometry.PointCloud, o3d.geometry.PointCloud, np.ndarray]:
     """
     Segment a plane and cluster the remaining objects in a point cloud.
 
@@ -117,77 +98,124 @@ def cluster_pc(
         )
     )
     if labels.size == 0:
-        print("[PC Utils] No clusters found")
-        return None
+        print("[PC Utils] No object clusters found")
 
+    return plane_cloud, object_cloud, labels
+
+
+def process_clusters_cube_sphere(
+    object_cloud: o3d.geometry.PointCloud,
+    labels: np.ndarray,
+    params: CubeSphereParams = CubeSphereParams(),
+) -> list[ClusterInfo]:
     # --- Cluster size filtering ---
-    unique_labels, counts = np.unique(labels[labels >= 0], return_counts=True)
+    valid_mask = labels >= 0
+    valid_labels = labels[valid_mask]
+    unique_labels, counts = np.unique(valid_labels, return_counts=True)
     cluster_sizes = dict(zip(unique_labels, counts))
-    sorted_clusters = sorted(cluster_sizes.items(), key=lambda x: x[1])  # (label, size)
 
-    sizes = [size for _, size in sorted_clusters]
+    sizes = np.array(list(cluster_sizes.values()))
     low, high = np.percentile(sizes, params.outlier_percentiles)
-    kept_clusters = [label for label, size in sorted_clusters if low <= size <= high]
+    kept_clusters = [lbl for lbl, sz in cluster_sizes.items() if low <= sz <= high]
+    # sort by size descending
+    kept_clusters.sort(key=lambda x: cluster_sizes[x])
 
     if not kept_clusters:
         print("[PC Utils] No clusters after filtering by size")
-        return None
+        return []
 
-    # --- Keep only points from filtered clusters ---
-    keep_indices = np.where(np.isin(labels, kept_clusters))[0]
-    object_cloud = object_cloud.select_by_index(keep_indices)
-    labels = labels[keep_indices]
-    obj_colors = np.asarray(object_cloud.colors)
+    # --- Keep only relevant points ---
+    keep_mask = np.isin(labels, kept_clusters)
+    points = np.asarray(object_cloud.points)[keep_mask]
+    colors = np.asarray(object_cloud.colors)[keep_mask]
+    labels = labels[keep_mask]
 
-    # --- Hierarchical grouping ---
+    # --- Hierarchical grouping by cluster size ---
     kept_sizes = np.array([cluster_sizes[lbl] for lbl in kept_clusters]).reshape(-1, 1)
     Z = linkage(kept_sizes, method="ward")
     groups = fcluster(Z, t=params.fcluster_thresh, criterion="distance")
 
-    # Build mapping label -> raw group
-    label_to_group = {lbl: grp for lbl, grp in zip(kept_clusters, groups)}
+    # Remap groups (smallest → 1)
+    group_means = {grp: np.mean([cluster_sizes[lbl] for lbl, g in zip(kept_clusters, groups) if g == grp])
+                   for grp in np.unique(groups)}
+    sorted_groups = sorted(group_means.items(), key=lambda x: x[1])
+    remap = {old: i + 1 for i, (old, _) in enumerate(sorted_groups)}
+    label_to_group = {lbl: remap[g] for lbl, g in zip(kept_clusters, groups)}
 
-    # --- Remap groups so that the smallest clusters = group 1 ---
-    # Compute mean size per group
-    group_means = {}
-    for lbl, grp in label_to_group.items():
-        group_means.setdefault(grp, []).append(cluster_sizes[lbl])
-    group_means = {grp: np.mean(sizes) for grp, sizes in group_means.items()}
-
-    # Sort groups by mean size, assign new ids
-    sorted_groups = sorted(group_means.items(), key=lambda x: x[1])  # smallest → largest
-    remap = {old_grp: new_id+1 for new_id, (old_grp, _) in enumerate(sorted_groups)}
-
-    # Apply remap
-    label_to_group = {lbl: remap[grp] for lbl, grp in label_to_group.items()}
-
-    # --- Recolor each cluster uniformly ---
-    clusters = []
-    for lbl, grp in label_to_group.items():
+    # --- Prepare for KMeans on diameters ---
+    diameters = []
+    for lbl in kept_clusters:
         mask = labels == lbl
-        if not np.any(mask):
+        pts = points[mask]
+        diameters.append(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+    diameters = np.array(diameters).reshape(-1, 1)
+
+    diam_labels = KMeans(n_clusters=2, random_state=0).fit_predict(diameters)
+
+    sizes = np.array([cluster_sizes[lbl] for lbl in kept_clusters])
+    # Remap KMeans labels so that 1 = small, 2 = large
+    if sizes[diam_labels == 0].mean() < sizes[diam_labels == 1].mean():
+        kmeans_remap = {0: 1, 1: 2}
+    else:
+        kmeans_remap = {0: 2, 1: 1}
+    diam_labels = np.array([kmeans_remap[d] for d in diam_labels])
+
+    # --- Build cluster info in one pass ---
+    clusters: list[ClusterInfo] = []
+    for i, lbl in enumerate(kept_clusters):
+        mask = labels == lbl
+        pts = points[mask]
+        cols = colors[mask]
+        if pts.size == 0:
             continue
-        
-        cluster_color = obj_colors[mask].mean(axis=0)
-        obj_colors[mask] = cluster_color
 
-        centroid = np.mean(np.asarray(object_cloud.points)[mask], axis=0)
-        clusters.append({
-            "group": grp,  # now guaranteed: smallest = group 1
-            "centroid": centroid,
-            "color": cluster_color,
-            "size": cluster_sizes[lbl],
-        })
+        centroid = pts.mean(axis=0)
+        color_mean = cols.mean(axis=0)
+        z_range = pts[:, 2].ptp()
+        if z_range < params.z_range_thresh:
+            continue
 
-    # Debug print
-    sizes_debug = [c["size"] for c in clusters]
-    print(f"[PC Utils] Kept clusters sizes: {sizes_debug}")
-    for cluster in clusters:
-        print(f"[PC Utils] Cluster group {cluster['group']} - size {cluster['size']}")
+        cluster_pc = o3d.geometry.PointCloud()
+        cluster_pc.points = o3d.utility.Vector3dVector(pts)
+        cluster_pc.colors = o3d.utility.Vector3dVector(cols)
+
+        group_id = label_to_group[lbl]
+        size_group = "CUBE" if group_id == 1 or diam_labels[i] == 1 else "BALL"
+        object_class = ObjectClass[size_group]
+        color_label = get_color_label(color_mean.tolist())
+
+        diameter = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+
+        cluster_info = ClusterInfo(
+            object_class=object_class,
+            centroid=centroid.tolist(),
+            color=color_mean.tolist(),
+            size=cluster_sizes[lbl],
+            diameter=round(diameter, 3),
+            color_label=color_label,
+        )
+        clusters.append(cluster_info)
+
+    return clusters
 
 
-    object_cloud.colors = o3d.utility.Vector3dVector(obj_colors)
+def get_color_label(rgb: list[float]) -> ColorLabel:
+    # Convert [0,1] → [0,255]
+    rgb_255 = np.clip(np.array(rgb, dtype=np.float32).reshape(1, 1, 3) * 255, 0, 255).astype(np.uint8)
+    hsv = cv2.cvtColor(rgb_255, cv2.COLOR_RGB2HSV)[0, 0]  # [H, S, V]
 
-    return plane_cloud, object_cloud, clusters
+    h, s, v = hsv
+    if v < 40 or s < 50:  # very dark or desaturated → treat as grayish
+        return ColorLabel.GRAY
 
-
+    # Hue ranges (OpenCV hue = 0–179)
+    if (h < 15) or (h >= 160):   # red, orange
+        return ColorLabel.RED
+    elif 15 <= h < 45:           # yellow
+        return ColorLabel.YELLOW
+    elif 45 <= h < 85:           # green
+        return ColorLabel.GREEN
+    elif 85 <= h < 160:          # blue, purple
+        return ColorLabel.BLUE
+    else:
+        return ColorLabel.UNKNOWN

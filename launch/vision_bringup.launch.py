@@ -5,11 +5,16 @@ def generate_launch_description():
 
     # Declare arguments
     sl.declare_arg('robot_ip', '192.168.1.12', description='IP address of the Kinova robot')
-    sl.declare_arg('prefix', 'kinova_', description='Prefix for joint names, useful for multi-robot setup')
+    sl.declare_arg('prefix', '', description='Prefix for joint names, useful for multi-robot setup')
 
-    sl.declare_arg('color_resolution', '640x480',
+    sl.declare_arg('color_resolution',
+                   '640x480',
+                     # '1280x720',
+                     # '1920x1080',
                    description='Resolution for color calibration')
-    sl.declare_arg('depth_resolution', '480x270',
+    sl.declare_arg('depth_resolution', 
+                   # '480x270',
+                   '424x240',
                    description='Resolution for depth calibration')
     sl.declare_arg('depth_registration', 'true',
                    description='Enable depth registration')
@@ -23,8 +28,8 @@ def generate_launch_description():
         launch_arguments={
             'device': sl.arg('robot_ip'),
             'camera_link_frame_id': sl.arg('prefix') + 'camera_link',
-            'color_frame_id': sl.arg('prefix') + 'color_frame',
-            'depth_frame_id': sl.arg('prefix') + 'depth_frame',
+            'color_frame_id': sl.arg('prefix') + 'camera_color_frame',
+            'depth_frame_id': sl.arg('prefix') + 'camera_depth_frame',
             'depth_registration': sl.arg('depth_registration'),
             'color_camera_info_url': 'file://' + color_calib,
             'depth_camera_info_url': 'file://' + depth_calib,

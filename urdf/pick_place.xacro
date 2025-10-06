@@ -7,10 +7,10 @@
   <xacro:arg name="fake_sensor_commands" default="false" />
   <xacro:arg name="robot_ip" default="" />
   <xacro:arg name="gripper_joint_name" default="" />
-
+  <xacro:arg name="prefix" default="" />
+  
   <xacro:property name="PI" value="3.14159265359" />
 
-  <xacro:property name="prefix" value="kinova_" />
 
   <!-- parameters -->
   <xacro:property name="arm" value="gen3" />
@@ -60,7 +60,7 @@
   </xacro:table>
 
   <!-- kinova table mount -->
-  <link name="${prefix}table_mount">
+  <link name="$(arg prefix)table_mount">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
@@ -84,9 +84,9 @@
   <xacro:property name="mount_origin_z" value="0.013" />
   <xacro:property name="robot_origin_yaw" value="${PI/2}" />
 
-  <joint name="${prefix}table_mount_joint" type="fixed">
+  <joint name="$(arg prefix)table_mount_joint" type="fixed">
     <parent link="${table_prefix}_top"/>
-    <child link="${prefix}table_mount"/>
+    <child link="$(arg prefix)table_mount"/>
     <origin xyz="${mount_origin_x} ${mount_origin_y} ${mount_origin_z}" rpy="0 0 0"/>
   </joint>
 
@@ -95,8 +95,8 @@
     arm="${arm}"
     dof="${dof}"
     gripper="${gripper}"
-    prefix="${prefix}"
-    parent="${prefix}table_mount"
+    prefix="$(arg prefix)"
+    parent="$(arg prefix)table_mount"
     vision="true"
     use_fake_hardware="$(arg use_fake_hardware)"
     fake_sensor_commands="$(arg fake_sensor_commands)"
@@ -117,10 +117,10 @@
   <xacro:property name="robotiq_85_base_tip_closed_length" value="0.1628" />
 
   <!-- robotiq 2f-85 grasp link -->
-  <link name="${prefix}robotiq_85_grasp_link" />
-  <joint name="${prefix}robotiq_85_grasp_joint" type="fixed">
-    <parent link="${prefix}robotiq_85_base_link"/>
-    <child link="${prefix}robotiq_85_grasp_link"/>
+  <link name="$(arg prefix)robotiq_85_grasp_link" />
+  <joint name="$(arg prefix)robotiq_85_grasp_joint" type="fixed">
+    <parent link="$(arg prefix)robotiq_85_base_link"/>
+    <child link="$(arg prefix)robotiq_85_grasp_link"/>
     <origin rpy="0 0 0" xyz="0 0 ${robotiq_85_base_tip_open_length}"/>
   </joint>
 
