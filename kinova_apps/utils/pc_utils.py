@@ -1,0 +1,117 @@
+import numpy as np
+import open3d as o3d
+
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Header
+
+from pydantic import BaseModel
+
+
+class PlaneSegParams(BaseModel):
+    plane_dist_thresh: float = 0.01
+    ransac_n: int = 5
+    num_iters: int = 1000
+
+
+class DBSCANParams(BaseModel):
+    eps: float = 0.02
+    min_points: int = 10
+
+
+class ClusterParams(BaseModel):
+    voxel_size: float = 0.001
+    plane_seg: PlaneSegParams = PlaneSegParams()
+    dbscan: DBSCANParams = DBSCANParams()
+
+
+def o3dpc_to_ros(pc: o3d.geometry.PointCloud, frame_id: str, stamp=None) -> PointCloud2:
+    """Convert Open3D PointCloud to ROS2 PointCloud2 with XYZRGB"""
+    # Extract points
+    points = np.asarray(pc.points)
+
+    # Extract colors if available, otherwise set white
+    if pc.has_colors():
+        colors = (np.asarray(pc.colors) * 255).astype(np.uint8)
+    else:
+        colors = np.ones((points.shape[0], 3), dtype=np.uint8) * 255
+
+    # Pack RGB into a single float32 (same as ROS PointCloud2 expects)
+    rgb_packed = (
+        (colors[:, 0].astype(np.uint32) << 16) |
+        (colors[:, 1].astype(np.uint32) << 8) |
+        (colors[:, 2].astype(np.uint32))
+    ).astype(np.uint32)
+
+    rgb_packed = rgb_packed.view(np.float32)  # reinterpret as float32
+
+    # Combine XYZ + RGB
+    points_with_rgb = np.hstack([points, rgb_packed.reshape(-1, 1)])
+
+    # Build header
+    header = Header()
+    header.stamp = stamp
+    header.frame_id = frame_id
+
+    # Define fields: x,y,z,rgb
+    fields = [
+        point_cloud2.PointField(name='x', offset=0, datatype=point_cloud2.PointField.FLOAT32, count=1),
+        point_cloud2.PointField(name='y', offset=4, datatype=point_cloud2.PointField.FLOAT32, count=1),
+        point_cloud2.PointField(name='z', offset=8, datatype=point_cloud2.PointField.FLOAT32, count=1),
+        point_cloud2.PointField(name='rgb', offset=12, datatype=point_cloud2.PointField.FLOAT32, count=1),
+    ]
+
+    # Create PointCloud2
+    pc2_msg = point_cloud2.create_cloud(header, fields, points_with_rgb)
+    return pc2_msg
+
+
+def cluster_pc(
+    pc: np.ndarray, params: ClusterParams = ClusterParams()
+) -> tuple[o3d.geometry.PointCloud, o3d.geometry.PointCloud, np.ndarray]:
+    """
+    Segment a plane and cluster the remaining objects in a point cloud.
+
+    Returns:
+        plane_cloud (PointCloud): the segmented plane
+        objects_cloud (PointCloud): clustered objects (filtered & recolored)
+    """
+
+    # --- Convert numpy -> Open3D point cloud ---
+    o3d_pc = o3d.geometry.PointCloud()
+    o3d_pc.points = o3d.utility.Vector3dVector(pc[:, :, :3].reshape(-1, 3))
+
+    # Unpack packed RGB
+    rgb_packed = pc[:, :, 3].reshape(-1).view(np.uint32)
+    r = ((rgb_packed >> 16) & 255).astype(np.uint8)
+    g = ((rgb_packed >> 8) & 255).astype(np.uint8)
+    b = (rgb_packed & 255).astype(np.uint8)
+    rgb = np.stack([r, g, b], axis=-1).astype(np.float32) / 255.0
+    o3d_pc.colors = o3d.utility.Vector3dVector(rgb)
+
+    # --- Downsample ---
+    downpcd = o3d_pc.voxel_down_sample(voxel_size=params.voxel_size)
+
+    # --- Plane segmentation ---
+    _, inliers = downpcd.segment_plane(
+        distance_threshold=params.plane_seg.plane_dist_thresh,
+        ransac_n=params.plane_seg.ransac_n,
+        num_iterations=params.plane_seg.num_iters,
+    )
+    plane_cloud = downpcd.select_by_index(inliers)
+    object_cloud = downpcd.select_by_index(inliers, invert=True)
+
+    # --- Object clustering (DBSCAN) ---
+    labels = np.array(
+        object_cloud.cluster_dbscan(
+            eps=params.dbscan.eps,
+            min_points=params.dbscan.min_points,
+            print_progress=False,
+        )
+    )
+    if labels.size == 0:
+        print("[PC Utils] No object clusters found")
+
+    return plane_cloud, object_cloud, labels
+
+

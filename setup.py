@@ -25,9 +25,7 @@ setup(
     license='TODO: License declaration',
     entry_points={
         'console_scripts': [
-            'sort_objects = kinova_apps.sort_objects:main',
-            'image_util_node = kinova_apps.scripts.image_util_node:main',
-            'hsv_calib = kinova_apps.scripts.hsv_calib:main',
+            'sort_cubes_spheres = kinova_apps.nodes.sort_cubes_spheres:main',
         ],
     },
 )
