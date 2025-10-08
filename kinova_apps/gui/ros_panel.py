@@ -1,29 +1,22 @@
-import sys
 import os
-import cv2
 import threading
 import datetime
 from typing import Dict
 
-from PySide6.QtCore import Qt, QTimer, QSize
-from PySide6.QtGui import QImage, QPixmap, QAction
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QLabel, QListWidget, QListWidgetItem,
-    QAbstractItemView, QPushButton, QLineEdit, QFileDialog, QMessageBox,
-    QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, QToolBar, QStatusBar
-)
-
-import rclpy
 from rclpy.node import Node
 from rclpy.executors import SingleThreadedExecutor
-from rclpy.serialization import serialize_message
 from rosidl_runtime_py.utilities import get_message
+from rclpy.serialization import serialize_message
+from rosbag2_py import SequentialWriter, StorageOptions, ConverterOptions, TopicMetadata
 
-from rosbag2_py import SequentialWriter, StorageOptions, ConverterOptions
-from rosbag2_py import TopicMetadata, Info, MetadataIo
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QListWidget, QListWidgetItem,
+    QAbstractItemView, QPushButton, QLineEdit, QFileDialog, QMessageBox, QCheckBox, QFormLayout
+)
 
-import qdarktheme
-
+from kinova_apps.gui.experiment_manager import ExperimentManager
+from typing import Optional
 
 
 class RosDiscovery(Node):
@@ -45,7 +38,6 @@ class RosbagRecorder(Node):
         output_dir = self._prepare_output_dir(output_dir)
         self.output_dir = output_dir
 
-        # Initialize SequentialWriter
         self.writer = SequentialWriter()
         storage_opts = StorageOptions(uri=output_dir, storage_id="sqlite3")
         conv_opts = ConverterOptions(
@@ -87,18 +79,13 @@ class RosbagRecorder(Node):
                     self.get_logger().warning(f"Existing dir non-empty; switching to {new_dir}")
                     output_dir = new_dir
                 else:
-                    # Empty dir — remove it, so rosbag2 can recreate
                     os.rmdir(output_dir)
-            # IMPORTANT: do NOT call os.makedirs() here;
-            # SequentialWriter.open() will create it.
         except Exception as e:
             self.get_logger().error(f"Error preparing output dir: {e}")
             raise
         return output_dir
 
-
     def destroy_node(self):
-        """Ensure writer finalizes before node destruction."""
         try:
             if hasattr(self, "writer") and self.writer is not None:
                 self.get_logger().info("Finalizing rosbag writer...")
@@ -134,93 +121,27 @@ class RecorderThread(threading.Thread):
         self._stop_event.set()
 
 
-class CameraPanel(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.url_input = QLineEdit("http://192.168.0.101:8080/video")
-        self.start_btn = QPushButton("Start Feed")
-        self.stop_btn = QPushButton("Stop Feed")
-        self.stop_btn.setEnabled(False)
-        self.view = QLabel("Camera feed")
-        self.view.setAlignment(Qt.AlignCenter)
-        self.view.setMinimumSize(QSize(480, 320))
-        self.view.setScaledContents(True)
-
-        h = QHBoxLayout()
-        h.addWidget(self.url_input, 1)
-        h.addWidget(self.start_btn)
-        h.addWidget(self.stop_btn)
-
-        box = QGroupBox("Camera")
-        inner = QVBoxLayout()
-        inner.addLayout(h)
-        inner.addWidget(self.view)
-        box.setLayout(inner)
-
-        lay = QVBoxLayout(self)
-        lay.addWidget(box)
-
-        self.cap = None
-        self.timer = QTimer(self)
-        self.timer.setInterval(30)
-        self.timer.timeout.connect(self._update_frame)
-        self.start_btn.clicked.connect(self.start)
-        self.stop_btn.clicked.connect(self.stop)
-
-    def start(self):
-        url = self.url_input.text().strip()
-        self.cap = cv2.VideoCapture(url)
-        if not self.cap.isOpened():
-            self.view.setText("Failed to open stream.")
-            if self.cap:
-                self.cap.release()
-                self.cap = None
-            return
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.timer.start()
-
-    def stop(self):
-        self.timer.stop()
-        if self.cap:
-            self.cap.release()
-            self.cap = None
-        self.view.setText("Camera feed")
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-
-    def _update_frame(self):
-        if not self.cap:
-            return
-        ok, frame = self.cap.read()
-        if not ok:
-            return
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = frame.shape
-        qimg = QImage(frame.data, w, h, ch * w, QImage.Format_RGB888)
-        self.view.setPixmap(QPixmap.fromImage(qimg))
-
-    def close(self):
-        self.stop()
-
-
 class RosPanel(QWidget):
-    def __init__(self, *, context, parent=None):
+    def __init__(self, *, context, exp: ExperimentManager, parent=None):
         super().__init__(parent)
         self.context = context
+        self.exp = exp
 
         self.topics_list = QListWidget()
-        self.topics_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.topics_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+
         self.refresh_btn = QPushButton("Refresh Topics")
         self.record_btn = QPushButton("Start Recording")
         self.stop_btn = QPushButton("Stop Recording")
         self.stop_btn.setEnabled(False)
 
-        self.output_dir_edit = QLineEdit(os.path.abspath("./bags"))
-        self.browse_btn = QPushButton("Browse...")
+        self.output_dir_edit = QLineEdit()
+
+        self.chk_all = QCheckBox("Record ALL topics")
 
         form = QFormLayout()
-        form.addRow("Output dir:", self._row(self.output_dir_edit, self.browse_btn))
+        form.addRow("Output dir:", self._row(self.output_dir_edit))
+        form.addRow(self.chk_all)
 
         btns = QHBoxLayout()
         btns.addWidget(self.refresh_btn)
@@ -239,13 +160,13 @@ class RosPanel(QWidget):
         lay.addWidget(box)
 
         self.discovery = RosDiscovery(context=self.context)
-        self.recorder_thread: RecorderThread | None = None
+        self.recorder_thread: Optional[RecorderThread] = None
 
         self.refresh_btn.clicked.connect(self.refresh_topics)
         self.record_btn.clicked.connect(self.start_recording)
         self.stop_btn.clicked.connect(self.stop_recording)
-        self.browse_btn.clicked.connect(self.pick_output_dir)
         self.topics_list.itemSelectionChanged.connect(self._sel_changed)
+        self.chk_all.stateChanged.connect(self._sel_changed)
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(1500)
@@ -253,6 +174,27 @@ class RosPanel(QWidget):
         self._refresh_timer.start()
 
         self.refresh_topics()
+    
+    def refresh(self):
+        self.setup_logs()
+        self.output_dir_edit.setText(self.bag_output_base())
+        self.refresh_topics()
+
+    def reset(self):
+        self.stop_recording()
+        self.output_dir_edit.clear()
+        self.topics_list.clear()
+        self.chk_all.setChecked(False)
+
+    def setup_logs(self):
+        run_dir = self.exp.ensure_run()
+        self.bags_dir = os.path.join(run_dir, "bags")
+        os.makedirs(self.bags_dir, exist_ok=True)
+
+    def bag_output_base(self) -> str:
+        self.exp.ensure_run()
+        assert self.bags_dir is not None
+        return self.bags_dir
 
     def _row(self, *widgets):
         h = QHBoxLayout()
@@ -261,7 +203,6 @@ class RosPanel(QWidget):
         return h
 
     def refresh_topics(self):
-        """Refresh the list of topics without losing selection."""
         current_selection = {item.text().split(" ")[0] for item in self.topics_list.selectedItems()}
         topics = self.discovery.list_topics()
 
@@ -271,7 +212,6 @@ class RosPanel(QWidget):
             topic_name = item.text().split(" ")[0]
             existing_items[topic_name] = item
 
-        # Add new topics
         for topic_name, type_str in topics.items():
             if topic_name not in existing_items:
                 item = QListWidgetItem(f"{topic_name} ({type_str})")
@@ -279,14 +219,11 @@ class RosPanel(QWidget):
                 if topic_name in current_selection:
                     item.setSelected(True)
             else:
-                # Update type string if changed
                 existing_item = existing_items[topic_name]
                 if f"{topic_name} ({type_str})" != existing_item.text():
                     existing_item.setText(f"{topic_name} ({type_str})")
-                # Keep selection state stable
                 existing_item.setSelected(topic_name in current_selection)
 
-        # Remove topics that disappeared
         i = 0
         while i < self.topics_list.count():
             item = self.topics_list.item(i)
@@ -295,18 +232,17 @@ class RosPanel(QWidget):
                 self.topics_list.takeItem(i)
             else:
                 i += 1
-
+        
         self._sel_changed()
 
-
     def _sel_changed(self):
-        has_sel = len(self.topics_list.selectedItems()) > 0
-        self.record_btn.setEnabled(has_sel and self.recorder_thread is None)
-
-    def pick_output_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "Choose output directory", self.output_dir_edit.text())
-        if d:
-            self.output_dir_edit.setText(d)
+        if self.chk_all.isChecked():
+            # when recording all, selections mean EXCLUDED topics
+            self.record_btn.setEnabled(self.recorder_thread is None)
+        else:
+            # when not recording all, selections mean INCLUDED topics
+            has_sel = len(self.topics_list.selectedItems()) > 0
+            self.record_btn.setEnabled(has_sel and self.recorder_thread is None)
 
     def _selected_topic_map(self) -> Dict[str, str]:
         topics = self.discovery.list_topics()
@@ -317,10 +253,20 @@ class RosPanel(QWidget):
                 res[name] = topics[name]
         return res
 
+    def _all_topics_with_exclusions(self) -> Dict[str, str]:
+        """Return all topics minus selected ones (when record-all is checked)."""
+        topics = self.discovery.list_topics()
+        excludes = {item.text().split(" ")[0] for item in self.topics_list.selectedItems()}
+        return {k: v for k, v in topics.items() if k not in excludes}
+
     def start_recording(self):
-        topics = self._selected_topic_map()
+        if self.chk_all.isChecked():
+            topics = self._all_topics_with_exclusions()
+        else:
+            topics = self._selected_topic_map()
+
         if not topics:
-            QMessageBox.warning(self, "rosbag2", "Select at least one topic.")
+            QMessageBox.warning(self, "rosbag2", "No topics selected or available.")
             return
 
         outdir_base = self.output_dir_edit.text().strip()
@@ -349,57 +295,4 @@ class RosPanel(QWidget):
         self._refresh_timer.stop()
         self.stop_recording()
         self.discovery.destroy_node()
-
-
-class MainWindow(QMainWindow):
-    def __init__(self, *, context):
-        super().__init__()
-        self.setWindowTitle("Mobile Camera + ROS2 Recorder")
-        self.resize(1100, 700)
-
-        self.camera = CameraPanel()
-        self.ros = RosPanel(context=context)
-
-        central = QWidget()
-        h = QHBoxLayout(central)
-        h.addWidget(self.camera, 2)
-        h.addWidget(self.ros, 1)
-        self.setCentralWidget(central)
-
-        tb = QToolBar("Main")
-        tb.setIconSize(QSize(16, 16))
-        self.addToolBar(tb)
-
-        act_refresh = QAction("Refresh Topics", self)
-        act_refresh.triggered.connect(self.ros.refresh_topics)
-        tb.addAction(act_refresh)
-
-        act_stop = QAction("Stop Recording", self)
-        act_stop.triggered.connect(self.ros.stop_recording)
-        tb.addAction(act_stop)
-
-        self.setStatusBar(QStatusBar())
-
-    def closeEvent(self, e):
-        self.camera.close()
-        self.ros.close()
-        super().closeEvent(e)
-
-
-def main():
-    context = rclpy.context.Context()
-    rclpy.init(context=context)
-
-    app = QApplication(sys.argv)
-    app.setStyleSheet(qdarktheme.load_stylesheet())
-    win = MainWindow(context=context)
-    win.show()
-    code = app.exec()
-
-    rclpy.shutdown(context=context)
-    sys.exit(code)
-
-
-if __name__ == "__main__":
-    main()
-
+        return super().close()
