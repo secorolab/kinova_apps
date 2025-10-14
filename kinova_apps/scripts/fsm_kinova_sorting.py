@@ -27,6 +27,7 @@ from coord_dsl.fsm import FSMData, Transition, EventReaction
 class EventID(IntEnum):
     E_CONFIGURE_ENTER = 0
     E_CONFIGURE_EXIT = auto()
+    E_CONFIGURE_IDLE = auto()
     E_IDLE_ENTER = auto()
     E_IDLE_EXIT = auto()
     E_IDLE_HOME_ARM = auto()
@@ -118,7 +119,7 @@ def create_fsm() -> FSMData:
             condition_event_index=EventID.E_CONFIGURE_EXIT,
             transition_index=TransitionID.T_CONFIGURE_IDLE,
             fired_event_indices=[
-                EventID.E_IDLE_ENTER,
+                EventID.E_CONFIGURE_IDLE,
             ],
         ),
         ReactionID.R_E_IDLE_HOME_ARM: EventReaction(

@@ -1,7 +1,6 @@
 import signal
 import sys
 from dataclasses import dataclass
-import time
 from coord_dsl.event_loop import (
     produce_event,
     consume_event,
@@ -26,28 +25,127 @@ class UserData:
     first_dets: bool   = True
     num_sorted: int    = 0
     max_sort:   int    = 3
-    exit_flag:  bool   = False
 
 
-def wait_step(ud: UserData):
-    if ud.counter < 1:
-        # time.sleep(0.01)
-        ud.counter += 1
-        return True
-    ud.counter = 0
-    return True
 
 def configure_step(fsm: FSMData, ud: UserData):
     if consume_event(fsm.event_data, EventID.E_CONFIGURE_ENTER):
         print(f"Entered state '{StateID(fsm.current_state_index).name}'")
-        
-    time.sleep(4)
+ 
+    while ud.counter < 50:
+        ud.counter += 1
+        return False
 
+    print(f'Configured after {ud.counter} steps')
+    ud.counter = 0
     return True
+
 
 def idle_step(fsm: FSMData, ud: UserData):
     if consume_event(fsm.event_data, EventID.E_IDLE_ENTER):
         print(f"Entered state '{StateID(fsm.current_state_index).name}'")
+
+    if consume_event(fsm.event_data, EventID.E_SORTING_EXIT_IDLE_ENTER):
+        print("Returned to idle from sorting")
+        produce_event(fsm.event_data, EventID.E_IDLE_EXIT)
+
+    ud.counter += 1
+
+    if ud.counter == 20:
+        print(f'Leaving idle after {ud.counter} steps')
+        ud.counter = 0
+        return True
+    
+    if consume_event(fsm.event_data, EventID.E_CONFIGURE_IDLE):
+        print("Configure to idle transition")
+        ud.counter = 50
+        return True
+
+    if ud.counter >= 50:
+        print(f'Idle timeout after {ud.counter} steps, going to home arm')
+        ud.counter = 0
+        produce_event(fsm.event_data, EventID.E_IDLE_HOME_ARM)
+
+    return False
+
+
+def home_arm_step(fsm: FSMData, ud: UserData):
+    if consume_event(fsm.event_data, EventID.E_HOME_ARM_ENTER):
+        print(f"Entered state '{StateID(fsm.current_state_index).name}'")
+
+    while ud.counter < 30:
+        ud.counter += 1
+        return False
+
+    print(f'Arm homed after {ud.counter} steps')
+    ud.counter = 0
+
+    return True
+
+
+def sorting_step(fsm: FSMData, ud: UserData):
+    if consume_event(fsm.event_data, EventID.E_SORTING_ENTER):
+        print(f"Entered state '{StateID(fsm.current_state_index).name}'")
+        ud.num_sorted = 0
+        print('Detecting objects for the first time')
+        produce_event(fsm.event_data, EventID.E_SORTING_DETECT_OBJECTS)
+        return False
+
+    if ud.num_sorted >= ud.max_sort:
+        print(f'Sorted {ud.num_sorted} objects, exiting sorting')
+        return True
+
+    if consume_event(fsm.event_data, EventID.E_DETECT_OBJECTS_SORTING):
+        print(f"Returned to sorting from detect objects, sorted {ud.num_sorted} objects")
+        produce_event(fsm.event_data, EventID.E_PICK_OBJECT)
+
+    if consume_event(fsm.event_data, EventID.E_PLACE_OBJECT_SORTING):
+        ud.num_sorted += 1
+        print(f"Returned to sorting from place object, sorted {ud.num_sorted} objects")
+        if ud.num_sorted < ud.max_sort:
+            produce_event(fsm.event_data, EventID.E_SORTING_DETECT_OBJECTS)
+
+    return False
+
+
+def detect_objects_step(fsm: FSMData, ud: UserData):
+    if consume_event(fsm.event_data, EventID.E_DETECT_OBJECTS_ENTER):
+        print(f"Entered state '{StateID(fsm.current_state_index).name}'")
+
+    while ud.counter < 40:
+        ud.counter += 1
+        return False
+
+    print(f'Detected objects after {ud.counter} steps')
+    ud.counter = 0
+
+    return True
+
+
+def pick_object_step(fsm: FSMData, ud: UserData):
+    if consume_event(fsm.event_data, EventID.E_PICK_OBJECT_ENTER):
+        print(f"Entered state '{StateID(fsm.current_state_index).name}'")
+
+    while ud.counter < 60:
+        ud.counter += 1
+        return False
+
+    print(f'Picked object after {ud.counter} steps')
+    ud.counter = 0
+
+    return True
+
+
+def place_object_step(fsm: FSMData, ud: UserData):
+    if consume_event(fsm.event_data, EventID.E_PLACE_OBJECT_ENTER):
+        print(f"Entered state '{StateID(fsm.current_state_index).name}'")
+
+    while ud.counter < 60:
+        ud.counter += 1
+        return False
+
+    print(f'Placed object after {ud.counter} steps')
+    ud.counter = 0
 
     return True
 
@@ -56,10 +154,6 @@ def generic_on_end(fsm: FSMData, ud: UserData, end_events: list[EventID]):
     print(f"State '{StateID(fsm.current_state_index).name}' finished")
     for evt in end_events:
         produce_event(fsm.event_data, evt)
-
-def generic_on_start(fsm: FSMData, ud: UserData, start_event: EventID):
-    if consume_event(fsm.event_data, start_event):
-        print(f"Entered state '{StateID(fsm.current_state_index).name}'")
 
 def fsm_behavior(fsm: FSMData, ud: UserData, bhv_data: dict):
     cs = fsm.current_state_index
@@ -92,7 +186,37 @@ def main():
         StateID.S_IDLE: {
            "step": idle_step,
             "on_end": lambda fsm, ud: generic_on_end(
-                fsm, ud, [EventID.E_IDLE_EXIT]
+                fsm, ud, [EventID.E_STEP]
+            ),
+        },
+        StateID.S_HOME_ARM: {
+            "step": home_arm_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_HOME_ARM_EXIT]
+            ),
+        },
+        StateID.S_SORTING: {
+            "step": sorting_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_SORTING_EXIT]
+            ),
+        },
+        StateID.S_DETECT_OBJECTS: {
+            "step": detect_objects_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_DETECT_OBJECTS_EXIT]
+            ),
+        },
+        StateID.S_PICK_OBJECT: {
+            "step": pick_object_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_PICK_OBJECT_EXIT]
+            ),
+        },
+        StateID.S_PLACE_OBJECT: {
+            "step": place_object_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_PLACE_OBJECT_EXIT]
             ),
         },
     }

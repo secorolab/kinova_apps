@@ -12,54 +12,50 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 import numpy as np
 import open3d as o3d
-from scipy.cluster.hierarchy import linkage, fcluster
-from sklearn.cluster import KMeans
-import cv2
 from pydantic import BaseModel
-from enum import StrEnum
 from typing import Optional
 
+import signal
+import sys
+import random
+
+from coord_dsl.event_loop import (
+    produce_event,
+    consume_event,
+    reconfig_event_buffers,
+)
+from coord_dsl.fsm import FSMData, fsm_step
+
+from kinova_apps.scripts.fsm_kinova_sorting import (
+    EventID,
+    StateID,
+    create_fsm
+)
 from kinova_apps.utils.pc_utils import cluster_pc, o3dpc_to_ros
+from kinova_apps.utils.detect_cubes_spheres_from_pc import (
+    ObjectClass,
+    ClusterInfo,
+    process_clusters_cube_sphere
+)
 
 
-class ObjectClass(StrEnum):
-    CUBE = "cube"
-    BALL = "ball"
-
-
-class ColorLabel(StrEnum):
-    RED = "red"
-    GREEN = "green"
-    BLUE = "blue"
-    YELLOW = "yellow"
-    GRAY = "gray"
-    UNKNOWN = "unknown"
-
-
-class ClusterInfo(BaseModel):
-    object_class: ObjectClass
-    centroid: list[float]
-    color: list[float]
-    size: int
-    diameter: float
-    color_label: ColorLabel = ColorLabel.UNKNOWN
-
-
-class CubeSphereParams(BaseModel):
-    outlier_percentiles: tuple = (5, 90)
-    fcluster_thresh: float = 1000.0
-    z_range_thresh: float = 0.0065
+class UserData(BaseModel):
+    max_sort: int = 3
+    num_sorted: int = 0
+    sort_data: Optional[list[ClusterInfo]] = []
 
 
 class SortObjects(Node):
     def __init__(self):
         super().__init__('sort_objects')
+        self.logger = self.get_logger()
+        self.logger.info('SortObjects node started')
 
+    def configure(self):
         self.seg_plane_pub = self.create_publisher(PointCloud2, '/pc_plane', 10)
         self.pc_cluster_pub = self.create_publisher(PointCloud2, '/pc_cluster', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/detected_objects', 10)
-
-        self.get_logger().info('SortObjects node started')
+        self.logger.info('SortObjects node configured')
 
     def detect(self):
         ret = False
@@ -67,17 +63,17 @@ class SortObjects(Node):
         while not ret:
             ret, pc_msg = wait_for_message(node=self, msg_type=PointCloud2, topic='/camera/depth/color/points')
             if not rclpy_ok():
-                self.get_logger().info('Shutdown detected, exiting')
+                self.logger.info('Shutdown detected, exiting')
                 return
             if not ret:
-                self.get_logger().info('Waiting for point cloud message...')
+                self.logger.info('Waiting for point cloud message...')
 
         assert isinstance(pc_msg, PointCloud2)
 
         pc = point_cloud2.read_points_numpy(pc_msg, skip_nans=False, reshape_organized_cloud=True)
         # replace nan with 0
         pc = np.nan_to_num(pc, nan=0.0)
-        self.get_logger().info('Received synchronized messages')
+        self.logger.info('Received synchronized messages')
 
         pc_header = pc_msg.header
 
@@ -85,10 +81,10 @@ class SortObjects(Node):
         plane_cloud, obj_cluster_cloud, clusters = self.detect_pc_objects(pc)
         
         if len(clusters) == 0:
-            self.get_logger().info('No objects detected, skipping publishing')
+            self.logger.info('No objects detected, skipping publishing')
             return
 
-        self.get_logger().info(f'Detected {len(clusters)} objects')
+        self.logger.info(f'Detected {len(clusters)} objects')
 
         self.seg_plane_pub.publish(o3dpc_to_ros(plane_cloud, pc_header.frame_id, pc_header.stamp))
         self.pc_cluster_pub.publish(o3dpc_to_ros(obj_cluster_cloud, pc_header.frame_id, pc_header.stamp))
@@ -112,7 +108,7 @@ class SortObjects(Node):
             elif cluster.object_class == ObjectClass.BALL:
                 object_class = Marker.SPHERE
             else:
-                self.get_logger().warning(f'Unknown object class: {cluster.object_class}')
+                self.logger.warning(f'Unknown object class: {cluster.object_class}')
                 continue
 
             object_scale = cluster.diameter
@@ -144,133 +140,220 @@ class SortObjects(Node):
 
         self.marker_pub.publish(marker_array)
 
+    def home_arm(self):
+        self.logger.info('Homing arm (simulated)')
+        
+        if random.random() < 0.1:
+            self.logger.info('Homing in progress...')
+            return False
 
-def process_clusters_cube_sphere(
-    object_cloud: o3d.geometry.PointCloud,
-    labels: np.ndarray,
-    params: CubeSphereParams = CubeSphereParams(),
-) -> list[ClusterInfo]:
-    # --- Cluster size filtering ---
-    valid_mask = labels >= 0
-    valid_labels = labels[valid_mask]
-    unique_labels, counts = np.unique(valid_labels, return_counts=True)
-    cluster_sizes = dict(zip(unique_labels, counts))
+        return True
 
-    sizes = np.array(list(cluster_sizes.values()))
-    low, high = np.percentile(sizes, params.outlier_percentiles)
-    kept_clusters = [lbl for lbl, sz in cluster_sizes.items() if low <= sz <= high]
-    # sort by size descending
-    kept_clusters.sort(key=lambda x: cluster_sizes[x])
+    def pick_object(self):
+        self.logger.info('Picking object (simulated)')
+        
+        if random.random() < 0.1:
+            self.logger.info('Picking in progress...')
+            return False
 
-    if not kept_clusters:
-        print("[PC Utils] No clusters after filtering by size")
-        return []
+        return True
 
-    # --- Keep only relevant points ---
-    keep_mask = np.isin(labels, kept_clusters)
-    points = np.asarray(object_cloud.points)[keep_mask]
-    colors = np.asarray(object_cloud.colors)[keep_mask]
-    labels = labels[keep_mask]
+    def place_object(self):
+        self.logger.info('Placing object (simulated)')
+        
+        if random.random() < 0.1:
+            self.logger.info('Placing in progress...')
+            return False
 
-    # --- Hierarchical grouping by cluster size ---
-    kept_sizes = np.array([cluster_sizes[lbl] for lbl in kept_clusters]).reshape(-1, 1)
-    Z = linkage(kept_sizes, method="ward")
-    groups = fcluster(Z, t=params.fcluster_thresh, criterion="distance")
+        return True
 
-    # Remap groups (smallest → 1)
-    group_means = {grp: np.mean([cluster_sizes[lbl] for lbl, g in zip(kept_clusters, groups) if g == grp])
-                   for grp in np.unique(groups)}
-    sorted_groups = sorted(group_means.items(), key=lambda x: x[1])
-    remap = {old: i + 1 for i, (old, _) in enumerate(sorted_groups)}
-    label_to_group = {lbl: remap[g] for lbl, g in zip(kept_clusters, groups)}
+    def detect_objects(self):
+        self.logger.info('Detecting objects...')
+        
+        if random.random() < 0.1:
+            self.logger.info('Detection in progress...')
+            return False
 
-    # --- Prepare for KMeans on diameters ---
-    diameters = []
-    for lbl in kept_clusters:
-        mask = labels == lbl
-        pts = points[mask]
-        diameters.append(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
-    diameters = np.array(diameters).reshape(-1, 1)
-
-    diam_labels = KMeans(n_clusters=2, random_state=0).fit_predict(diameters)
-
-    sizes = np.array([cluster_sizes[lbl] for lbl in kept_clusters])
-    # Remap KMeans labels so that 1 = small, 2 = large
-    if sizes[diam_labels == 0].mean() < sizes[diam_labels == 1].mean():
-        kmeans_remap = {0: 1, 1: 2}
-    else:
-        kmeans_remap = {0: 2, 1: 1}
-    diam_labels = np.array([kmeans_remap[d] for d in diam_labels])
-
-    # --- Build cluster info in one pass ---
-    clusters: list[ClusterInfo] = []
-    for i, lbl in enumerate(kept_clusters):
-        mask = labels == lbl
-        pts = points[mask]
-        cols = colors[mask]
-        if pts.size == 0:
-            continue
-
-        centroid = pts.mean(axis=0)
-        color_mean = cols.mean(axis=0)
-        z_range = pts[:, 2].ptp()
-        if z_range < params.z_range_thresh:
-            continue
-
-        cluster_pc = o3d.geometry.PointCloud()
-        cluster_pc.points = o3d.utility.Vector3dVector(pts)
-        cluster_pc.colors = o3d.utility.Vector3dVector(cols)
-
-        group_id = label_to_group[lbl]
-        size_group = "CUBE" if group_id == 1 or diam_labels[i] == 1 else "BALL"
-        object_class = ObjectClass[size_group]
-        color_label = get_color_label(color_mean.tolist())
-
-        diameter = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
-
-        cluster_info = ClusterInfo(
-            object_class=object_class,
-            centroid=centroid.tolist(),
-            color=color_mean.tolist(),
-            size=cluster_sizes[lbl],
-            diameter=round(diameter, 3),
-            color_label=color_label,
-        )
-        clusters.append(cluster_info)
-
-    return clusters
+        return True
 
 
-def get_color_label(rgb: list[float]) -> ColorLabel:
-    # Convert [0,1] → [0,255]
-    rgb_255 = np.clip(np.array(rgb, dtype=np.float32).reshape(1, 1, 3) * 255, 0, 255).astype(np.uint8)
-    hsv = cv2.cvtColor(rgb_255, cv2.COLOR_RGB2HSV)[0, 0]  # [H, S, V]
 
-    h, s, v = hsv
-    if v < 40 or s < 50:  # very dark or desaturated → treat as grayish
-        return ColorLabel.GRAY
+def fsm_behavior(fsm: FSMData, ud: UserData, bhv_data: dict[StateID, dict], node: SortObjects):
+    cs = fsm.current_state_index
+    if cs not in bhv_data:
+        return
 
-    # Hue ranges (OpenCV hue = 0–179)
-    if (h < 15) or (h >= 160):   # red, orange
-        return ColorLabel.RED
-    elif 15 <= h < 45:           # yellow
-        return ColorLabel.YELLOW
-    elif 45 <= h < 85:           # green
-        return ColorLabel.GREEN
-    elif 85 <= h < 160:          # blue, purple
-        return ColorLabel.BLUE
-    else:
-        return ColorLabel.UNKNOWN
+    bhv_data_cs = bhv_data[StateID(cs)]
+
+    assert "step" in bhv_data_cs, f"no step defined for state: {cs}"
+    if not bhv_data_cs["step"](fsm, ud, node):
+        return
+
+    if "on_end" in bhv_data_cs:
+        bhv_data_cs["on_end"](fsm, ud)
+
+
+def signal_handler(sig, frame):
+    print("You pressed Ctrl+C! Exiting gracefully...")
+    rclpy.shutdown()
+    sys.exit(0)
+
+
+def generic_on_end(fsm: FSMData, ud: UserData, end_events: list[EventID]):
+    print(f"State '{StateID(fsm.current_state_index).name}' finished")
+    for evt in end_events:
+        produce_event(fsm.event_data, evt)
+
+
+def configure_step(fsm: FSMData, ud: UserData, node: SortObjects):
+    if consume_event(fsm.event_data, EventID.E_CONFIGURE_ENTER):
+        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+        
+        node.configure()
+
+        return True
+    
+    return False
+
+
+def idle_step(fsm: FSMData, ud: UserData, node: SortObjects):
+    if consume_event(fsm.event_data, EventID.E_IDLE_ENTER):
+        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+        return True
+
+    if consume_event(fsm.event_data, EventID.E_SORTING_EXIT_IDLE_ENTER):
+        node.logger.info("Returned to idle from sorting")
+        produce_event(fsm.event_data, EventID.E_IDLE_EXIT)
+        return False
+
+    if consume_event(fsm.event_data, EventID.E_CONFIGURE_IDLE):
+        node.logger.info("Entered idle from configure")
+        return True
+
+    produce_event(fsm.event_data, EventID.E_IDLE_HOME_ARM)
+
+    return False
+
+def home_arm_step(fsm: FSMData, ud: UserData, node: SortObjects):
+    if consume_event(fsm.event_data, EventID.E_HOME_ARM_ENTER):
+        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+        
+    return node.home_arm()
+
+def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
+    if consume_event(fsm.event_data, EventID.E_SORTING_ENTER):
+        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+        ud.num_sorted = 0
+        node.logger.info('Detecting objects for the first time')
+        produce_event(fsm.event_data, EventID.E_SORTING_DETECT_OBJECTS)
+        return False
+
+    if ud.num_sorted >= ud.max_sort:
+        node.logger.info(f'Sorted {ud.num_sorted} objects, exiting sorting')
+        return True
+
+    if consume_event(fsm.event_data, EventID.E_DETECT_OBJECTS_SORTING):
+        node.logger.info(f"Returned to sorting from detect objects, sorted {ud.num_sorted} objects")
+        produce_event(fsm.event_data, EventID.E_PICK_OBJECT)
+
+    if consume_event(fsm.event_data, EventID.E_PLACE_OBJECT_SORTING):
+        ud.num_sorted += 1
+        node.logger.info(f"Returned to sorting from place object, sorted {ud.num_sorted} objects")
+        if ud.num_sorted < ud.max_sort:
+            produce_event(fsm.event_data, EventID.E_SORTING_DETECT_OBJECTS)
+
+    return False
+
+def detect_objects_step(fsm: FSMData, ud: UserData, node: SortObjects):
+    if consume_event(fsm.event_data, EventID.E_DETECT_OBJECTS_ENTER):
+        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+
+    return node.detect_objects()
+
+def pick_object_step(fsm: FSMData, ud: UserData, node: SortObjects):
+    if consume_event(fsm.event_data, EventID.E_PICK_OBJECT_ENTER):
+        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+
+    return node.pick_object()
+
+def place_object_step(fsm: FSMData, ud: UserData, node: SortObjects):
+    if consume_event(fsm.event_data, EventID.E_PLACE_OBJECT_ENTER):
+        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+
+    return node.place_object()
+
 
 def main():
     rclpy.init()
-    node = SortObjects()
-    node.detect()
+    signal.signal(signal.SIGINT, signal_handler)
     
+    sort_objects_node = SortObjects()
+    
+    fsm = create_fsm()
+
+    fsm_bhv = {
+        StateID.S_CONFIGURE: {
+            "step": configure_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_CONFIGURE_EXIT]
+            ),
+        },
+        StateID.S_IDLE: {
+           "step": idle_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_STEP]
+            ),
+        },
+        StateID.S_HOME_ARM: {
+            "step": home_arm_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_HOME_ARM_EXIT]
+            ),
+        },
+        StateID.S_SORTING: {
+            "step": sorting_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_SORTING_EXIT]
+            ),
+        },
+        StateID.S_DETECT_OBJECTS: {
+            "step": detect_objects_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_DETECT_OBJECTS_EXIT]
+            ),
+        },
+        StateID.S_PICK_OBJECT: {
+            "step": pick_object_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_PICK_OBJECT_EXIT]
+            ),
+        },
+        StateID.S_PLACE_OBJECT: {
+            "step": place_object_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_PLACE_OBJECT_EXIT]
+            ),
+        },
+    }
+
+    ud = UserData()
+
     while rclpy_ok():
-        rclpy.spin_once(node)
+        # rclpy.spin_once(sort_objects_node, timeout_sec=0.1)
+
+        if fsm.current_state_index == StateID.S_EXIT:
+            sort_objects_node.get_logger().info('FSM reached EXIT state, shutting down')
+            break
+        
+        produce_event(fsm.event_data, EventID.E_STEP)
+        fsm_behavior(fsm, ud, fsm_bhv, sort_objects_node)
+        reconfig_event_buffers(fsm.event_data)
+        
+        fsm_step(fsm)
+        reconfig_event_buffers(fsm.event_data)
+
     
-    node.destroy_node()
+    sort_objects_node.destroy_node()
     rclpy.shutdown()
 
 
