@@ -31,7 +31,7 @@ class ClusterInfo(BaseModel):
 
 
 class CubeSphereParams(BaseModel):
-    outlier_percentiles: tuple = (5, 90)
+    outlier_percentiles: tuple = (5, 97)
     fcluster_thresh: float = 1000.0
     z_range_thresh: float = 0.0065
 
@@ -65,6 +65,21 @@ def process_clusters_cube_sphere(
 
     # --- Hierarchical grouping by cluster size ---
     kept_sizes = np.array([cluster_sizes[lbl] for lbl in kept_clusters]).reshape(-1, 1)
+    print(kept_sizes)
+    print(cluster_sizes)
+
+    cluster_z_mins = {}
+    for lbl in kept_clusters:
+        mask = labels == lbl
+        pts = points[mask]
+        z_min = pts[:, 2].min()
+        cluster_z_mins[lbl] = z_min
+
+    for lbl in sorted(kept_clusters, key=lambda x: cluster_sizes[x]):
+        size = cluster_sizes[lbl]
+        z_min = cluster_z_mins[lbl]
+        print(f"Cluster {lbl} size={size}, z_min={z_min}")
+
     Z = linkage(kept_sizes, method="ward")
     groups = fcluster(Z, t=params.fcluster_thresh, criterion="distance")
 
@@ -113,7 +128,7 @@ def process_clusters_cube_sphere(
         cluster_pc.colors = o3d.utility.Vector3dVector(cols)
 
         group_id = label_to_group[lbl]
-        size_group = "CUBE" if group_id == 1 or diam_labels[i] == 1 else "BALL"
+        size_group = "CUBE" if group_id == 1 else "BALL"
         object_class = ObjectClass[size_group]
         color_label = get_color_label(color_mean.tolist())
 

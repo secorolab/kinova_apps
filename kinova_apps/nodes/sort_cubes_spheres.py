@@ -169,10 +169,7 @@ class SortObjects(Node):
 
     def detect_objects(self):
         self.logger.info('Detecting objects...')
-        
-        if random.random() < 0.1:
-            self.logger.info('Detection in progress...')
-            return False
+        self.detect()
 
         return True
 
