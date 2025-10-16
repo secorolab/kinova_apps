@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import rclpy
+import rclpy.task
 from rclpy.node import Node
+from rclpy.action.client import ActionClient, ClientGoalHandle
 from rclpy.utilities import ok as rclpy_ok
 from rclpy.duration import Duration
 from rclpy.wait_for_message import wait_for_message
@@ -35,14 +37,28 @@ from kinova_apps.utils.pc_utils import cluster_pc, o3dpc_to_ros
 from kinova_apps.utils.detect_cubes_spheres_from_pc import (
     ObjectClass,
     ClusterInfo,
-    process_clusters_cube_sphere
+ process_clusters_cube_sphere
 )
 
+from kinova_moveit_client.action import MoveToCartesianPose, GripperCommand
+
+
+class ActionFuture(BaseModel):
+    send_goal_future: Optional[rclpy.task.Future] = None
+    goal_handle: Optional[ClientGoalHandle] = None
+    get_result_future: Optional[rclpy.task.Future] = None
 
 class UserData(BaseModel):
+    af: ActionFuture = ActionFuture()
     max_sort: int = 3
     num_sorted: int = 0
     sort_data: Optional[list[ClusterInfo]] = []
+    target_position: Optional[list[float]] = None
+    gripper_open: bool = True
+    target_objects: list[ClusterInfo] = []
+    move_arm: bool = False
+    return_event: Optional[EventID] = None
+    picked_objects: list[ClusterInfo] = []
 
 
 class SortObjects(Node):
@@ -55,18 +71,24 @@ class SortObjects(Node):
         self.seg_plane_pub = self.create_publisher(PointCloud2, '/pc_plane', 10)
         self.pc_cluster_pub = self.create_publisher(PointCloud2, '/pc_cluster', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/detected_objects', 10)
+
+        # action clients
+        self.move_to_pose_ac = ActionClient(self, MoveToCartesianPose, 'move_to_cartesian_pose')
+        self.gripper_ac = ActionClient(self, GripperCommand, 'gripper_command')
+
         self.logger.info('SortObjects node configured')
 
-    def detect(self):
+    def detect_objects(self) -> bool:
         ret = False
         pc_msg: Optional[PointCloud2] = None
-        while not ret:
-            ret, pc_msg = wait_for_message(node=self, msg_type=PointCloud2, topic='/camera/depth/color/points')
-            if not rclpy_ok():
-                self.logger.info('Shutdown detected, exiting')
-                return
-            if not ret:
-                self.logger.info('Waiting for point cloud message...')
+        # while not ret:
+        ret, pc_msg = wait_for_message(node=self, msg_type=PointCloud2, topic='/camera/depth/color/points', time_to_wait=1)
+        # if not rclpy_ok():
+        #     self.logger.info('Shutdown detected, exiting')
+        #     return
+        if not ret:
+            self.logger.info('Waiting for point cloud message...')
+            return False
 
         assert isinstance(pc_msg, PointCloud2)
 
@@ -82,13 +104,15 @@ class SortObjects(Node):
         
         if len(clusters) == 0:
             self.logger.info('No objects detected, skipping publishing')
-            return
+            return False
 
         self.logger.info(f'Detected {len(clusters)} objects')
 
         self.seg_plane_pub.publish(o3dpc_to_ros(plane_cloud, pc_header.frame_id, pc_header.stamp))
         self.pc_cluster_pub.publish(o3dpc_to_ros(obj_cluster_cloud, pc_header.frame_id, pc_header.stamp))
         self.publish_markers(clusters, pc_header)
+
+        return True
 
     def detect_pc_objects(self, pc: np.ndarray) -> tuple[o3d.geometry.PointCloud, o3d.geometry.PointCloud, list[ClusterInfo]]:
         plane_cloud, obj_cluster_cloud, labels = cluster_pc(pc)
@@ -149,11 +173,109 @@ class SortObjects(Node):
 
         return True
 
-    def pick_object(self):
-        self.logger.info('Picking object (simulated)')
+    def get_move_arm_msg(self, position: list[float]):
+        goal_msg = MoveToCartesianPose.Goal()
+        goal_msg.target_pose.pose.position.x = position[0]
+        goal_msg.target_pose.pose.position.y = position[1]
+        goal_msg.target_pose.pose.position.z = position[2]
+        goal_msg.target_pose.pose.orientation.x = 0.0
+        goal_msg.target_pose.pose.orientation.y = 0.0
+        goal_msg.target_pose.pose.orientation.z = 0.0
+        goal_msg.target_pose.pose.orientation.w = 1.0
+        goal_msg.target_pose.header.frame_id = 'base_link' # TODO: check
+        goal_msg.target_pose.header.stamp = self.get_clock().now().to_msg()
         
-        if random.random() < 0.1:
-            self.logger.info('Picking in progress...')
+        return goal_msg
+
+    def get_gripper_cmd_msg(self, position: float):
+        goal_msg = GripperCommand.Goal()
+        goal_msg.gripper_width = position
+        return goal_msg
+
+    def execute_action(self, ac: ActionClient, af: ActionFuture, goal_msg):
+        '''
+        Generic action execution function.
+        Call this function repeatedly until it returns True.
+
+        Parameters:
+        - ac: ActionClient
+        - af: ActionFuture
+        - goal_msg: Goal message to send
+        '''
+
+        assert ac is not None, "ActionClient is None"
+        assert af is not None, "ActionFuture is None"
+        assert goal_msg is not None, "Goal message is None"
+    
+        # check server availability
+        if not ac.server_is_ready():
+            self.logger.warning('action server not available')
+            return False
+
+        # send goal
+        if af.send_goal_future is None:
+            af.send_goal_future = ac.send_goal_async(goal_msg)
+            return False
+
+        # wait for goal to be accepted
+        if not af.send_goal_future.done():
+            self.logger.info('Waiting for goal to be accepted...')
+            return False
+
+        if af.goal_handle is None:
+            af.goal_handle = af.send_goal_future.result()
+            if not af.goal_handle or not af.goal_handle.accepted:
+                self.logger.error("Goal rejected")
+                af.send_goal_future = None
+                return False
+
+            self.logger.info("Goal accepted")
+            af.get_result_future = af.goal_handle.get_result_async()
+            af.send_goal_future = None
+            return False
+
+        # wait for result
+        if af.get_result_future is None:
+            self.logger.warning("get_result_future unexpectedly None")
+            return False
+
+        if not af.get_result_future.done():
+            self.logger.info("Waiting for result...")
+            return False
+
+        result = af.get_result_future.result()
+        self.logger.info(f'Action result: {result}')
+        
+        # reset action future for next use
+        self.reset_action_future(af)
+        return True
+
+    def reset_action_future(self, af: ActionFuture):
+        assert af is not None, "ActionFuture is None"
+
+        # cleanup
+        af.send_goal_future = None
+        af.get_result_future = None
+        af.goal_handle = None
+
+    def move_arm(self, af, target_position):
+        self.logger.info('Picking object')
+        
+        assert isinstance(target_position, list) and len(target_position) == 3, "target_position must be a list of 3 floats"
+
+        move_arm_msg = self.get_move_arm_msg(target_position)
+        # send goal to arm
+        if not self.execute_action(self.move_to_pose_ac, af, move_arm_msg):
+            return False
+
+        return True
+
+    def gripper_control(self, af, open: bool):
+        val = 0.9 if open else 0.0
+
+        gripper_msg = self.get_gripper_cmd_msg(val)
+        # send goal to gripper
+        if not self.execute_action(self.gripper_ac, af, gripper_msg):
             return False
 
         return True
@@ -166,13 +288,6 @@ class SortObjects(Node):
             return False
 
         return True
-
-    def detect_objects(self):
-        self.logger.info('Detecting objects...')
-        self.detect()
-
-        return True
-
 
 
 def fsm_behavior(fsm: FSMData, ud: UserData, bhv_data: dict[StateID, dict], node: SortObjects):
@@ -251,7 +366,13 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
 
     if consume_event(fsm.event_data, EventID.E_DETECT_OBJECTS_SORTING):
         node.logger.info(f"Returned to sorting from detect objects, sorted {ud.num_sorted} objects")
+        # TODO: select next object to pick
+        ud.gripper_open = False # close gripper to pick after moving arm
         produce_event(fsm.event_data, EventID.E_PICK_OBJECT)
+
+    if consume_event(fsm.event_data, EventID.E_PICK_OBJECT_EXIT):
+        ud.gripper_open = True # open gripper to place after moving arm
+        produce_event(fsm.event_data, EventID.E_PLACE_OBJECT)
 
     if consume_event(fsm.event_data, EventID.E_PLACE_OBJECT_SORTING):
         ud.num_sorted += 1
@@ -267,18 +388,51 @@ def detect_objects_step(fsm: FSMData, ud: UserData, node: SortObjects):
 
     return node.detect_objects()
 
+def move_arm_step(fsm: FSMData, ud: UserData, node: SortObjects):
+    if consume_event(fsm.event_data, EventID.E_MOVE_ARM_ENTER):
+        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+        
+    if not node.move_arm(ud.af, ud.target_position):
+        return False
+
+    produce_event(fsm.event_data, ud.return_event)
+    return True
+
+def gripper_control_step(fsm: FSMData, ud: UserData, node: SortObjects):
+    if consume_event(fsm.event_data, EventID.E_GRIPPER_CONTROL_ENTER):
+        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+
+    if not node.gripper_control(ud.af, ud.gripper_open):
+        return False
+
+    produce_event(fsm.event_data, ud.return_event)
+    return True
+
 def pick_object_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_PICK_OBJECT_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+        
+        target_object = ud.target_objects.pop(0)
+        ud.picked_objects.push(target_object)
+        ud.target_position = target_object.centroid # TODO: z should be monitored
+        node.logger.info(f"Picking object at position: {ud.target_position}")
+        ud.move_arm = True
+        return False
 
-    return node.pick_object()
+    if ud.move_arm:
+        ud.move_arm = False
+        ud.return_event = EventID.E_PICK_MOVE_ARM_EXIT
+        produce_event(fsm.event_data, EventID.E_PICK_MOVE_ARM)]
+        return False
 
-def place_object_step(fsm: FSMData, ud: UserData, node: SortObjects):
-    if consume_event(fsm.event_data, EventID.E_PLACE_OBJECT_ENTER):
-        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+    if consume_event(fsm.event_data, EventID.E_MOVE_ARM_PICK_ENTER):
+        ud.move_arm = False
+        ud.gripper_open = False # close gripper to pick
+        ud.return_event = EventID.E_PICK_GRIPPER_CONTROL_EXIT
+        produce_event(fsm.event_data, EventID.E_PICK_GRIPPER_CONTROL)
+        return False
 
-    return node.place_object()
-
+    return False
 
 def main():
     rclpy.init()
