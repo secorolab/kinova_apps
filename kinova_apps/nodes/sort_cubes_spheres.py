@@ -356,7 +356,9 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_SORTING_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
         ud.num_sorted = 0
-        node.logger.info('Detecting objects for the first time')
+        return False
+
+    if ud.num_sorted == 0:
         produce_event(fsm.event_data, EventID.E_SORTING_DETECT_OBJECTS)
         return False
 
@@ -365,20 +367,42 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
         return True
 
     if consume_event(fsm.event_data, EventID.E_DETECT_OBJECTS_SORTING):
-        node.logger.info(f"Returned to sorting from detect objects, sorted {ud.num_sorted} objects")
         # TODO: select next object to pick
-        ud.gripper_open = False # close gripper to pick after moving arm
-        produce_event(fsm.event_data, EventID.E_PICK_OBJECT)
-
-    if consume_event(fsm.event_data, EventID.E_PICK_OBJECT_EXIT):
-        ud.gripper_open = True # open gripper to place after moving arm
-        produce_event(fsm.event_data, EventID.E_PLACE_OBJECT)
-
-    if consume_event(fsm.event_data, EventID.E_PLACE_OBJECT_SORTING):
-        ud.num_sorted += 1
-        node.logger.info(f"Returned to sorting from place object, sorted {ud.num_sorted} objects")
+        
         if ud.num_sorted < ud.max_sort:
-            produce_event(fsm.event_data, EventID.E_SORTING_DETECT_OBJECTS)
+            # pick next object
+            ud.gripper_open = False # close gripper to pick after moving arm
+            ud.pick_object = True
+            ud.place_object = False
+            produce_event(fsm.event_data, EventID.E_MOVE_ARM)
+
+        return False
+
+    if consume_event(fsm.event_data, EventID.E_GC_SORTING_ENTER):
+        if ud.pick_object:
+            node.logger.info(f'Picked object, moving to place position')
+            # after picking, move to place position
+            ud.gripper_open = True # open gripper to place after moving arm
+            ud.place_object = True
+            ud.pick_object = False
+            produce_event(fsm.event_data, EventID.E_MOVE_ARM)
+
+        if ud.place_object:
+            ud.num_sorted += 1
+            node.logger.info(f'Placed {ud.num_sorted} object, picking next object')
+
+    
+            if ud.num_sorted >= ud.max_sort:
+                node.logger.info(f'Sorted {ud.num_sorted} objects, exiting sorting')
+                produce_event(fsm.event_data, EventID.E_SORTING_EXIT)
+                return False
+
+            ud.gripper_open = False # close gripper to pick after moving arm
+            ud.pick_object = True
+            ud.place_object = False
+            produce_event(fsm.event_data, EventID.E_MOVE_ARM)
+            
+        return False
 
     return False
 
@@ -391,11 +415,12 @@ def detect_objects_step(fsm: FSMData, ud: UserData, node: SortObjects):
 def move_arm_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_MOVE_ARM_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+
+        return False
         
     if not node.move_arm(ud.af, ud.target_position):
         return False
 
-    produce_event(fsm.event_data, ud.return_event)
     return True
 
 def gripper_control_step(fsm: FSMData, ud: UserData, node: SortObjects):
@@ -405,34 +430,8 @@ def gripper_control_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if not node.gripper_control(ud.af, ud.gripper_open):
         return False
 
-    produce_event(fsm.event_data, ud.return_event)
     return True
 
-def pick_object_step(fsm: FSMData, ud: UserData, node: SortObjects):
-    if consume_event(fsm.event_data, EventID.E_PICK_OBJECT_ENTER):
-        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
-        
-        target_object = ud.target_objects.pop(0)
-        ud.picked_objects.push(target_object)
-        ud.target_position = target_object.centroid # TODO: z should be monitored
-        node.logger.info(f"Picking object at position: {ud.target_position}")
-        ud.move_arm = True
-        return False
-
-    if ud.move_arm:
-        ud.move_arm = False
-        ud.return_event = EventID.E_PICK_MOVE_ARM_EXIT
-        produce_event(fsm.event_data, EventID.E_PICK_MOVE_ARM)]
-        return False
-
-    if consume_event(fsm.event_data, EventID.E_MOVE_ARM_PICK_ENTER):
-        ud.move_arm = False
-        ud.gripper_open = False # close gripper to pick
-        ud.return_event = EventID.E_PICK_GRIPPER_CONTROL_EXIT
-        produce_event(fsm.event_data, EventID.E_PICK_GRIPPER_CONTROL)
-        return False
-
-    return False
 
 def main():
     rclpy.init()
