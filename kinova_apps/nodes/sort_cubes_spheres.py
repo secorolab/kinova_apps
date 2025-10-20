@@ -48,6 +48,9 @@ class ActionFuture(BaseModel):
     goal_handle: Optional[ClientGoalHandle] = None
     get_result_future: Optional[rclpy.task.Future] = None
 
+    class Config:
+        arbitrary_types_allowed = True
+
 class UserData(BaseModel):
     af: ActionFuture = ActionFuture()
     max_sort: int = 3
@@ -59,6 +62,12 @@ class UserData(BaseModel):
     move_arm: bool = False
     return_event: Optional[EventID] = None
     picked_objects: list[ClusterInfo] = []
+    pick_object: bool = False
+    place_object: bool = False
+    detect_objects: bool = False
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class SortObjects(Node):
@@ -356,9 +365,11 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_SORTING_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
         ud.num_sorted = 0
+        ud.detect_objects = True
         return False
 
-    if ud.num_sorted == 0:
+    if ud.detect_objects:
+        node.logger.info('Starting object detection for sorting')
         produce_event(fsm.event_data, EventID.E_SORTING_DETECT_OBJECTS)
         return False
 
@@ -386,11 +397,11 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
             ud.place_object = True
             ud.pick_object = False
             produce_event(fsm.event_data, EventID.E_MOVE_ARM)
+            return False
 
         if ud.place_object:
             ud.num_sorted += 1
             node.logger.info(f'Placed {ud.num_sorted} object, picking next object')
-
     
             if ud.num_sorted >= ud.max_sort:
                 node.logger.info(f'Sorted {ud.num_sorted} objects, exiting sorting')
@@ -401,6 +412,7 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
             ud.pick_object = True
             ud.place_object = False
             produce_event(fsm.event_data, EventID.E_MOVE_ARM)
+            return False
             
         return False
 
@@ -409,8 +421,10 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
 def detect_objects_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_DETECT_OBJECTS_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+        return False
 
     return node.detect_objects()
+
 
 def move_arm_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_MOVE_ARM_ENTER):
@@ -472,16 +486,16 @@ def main():
                 fsm, ud, [EventID.E_DETECT_OBJECTS_EXIT]
             ),
         },
-        StateID.S_PICK_OBJECT: {
-            "step": pick_object_step,
+        StateID.S_MOVE_ARM: {
+            "step": move_arm_step,
             "on_end": lambda fsm, ud: generic_on_end(
-                fsm, ud, [EventID.E_PICK_OBJECT_EXIT]
+                fsm, ud, [EventID.E_MOVE_ARM_EXIT]
             ),
         },
-        StateID.S_PLACE_OBJECT: {
-            "step": place_object_step,
+        StateID.S_GRIPPER_CONTROL: {
+            "step": gripper_control_step,
             "on_end": lambda fsm, ud: generic_on_end(
-                fsm, ud, [EventID.E_PLACE_OBJECT_EXIT]
+                fsm, ud, [EventID.E_GRIPPER_CONTROL_EXIT]
             ),
         },
     }
@@ -489,18 +503,18 @@ def main():
     ud = UserData()
 
     while rclpy_ok():
-        # rclpy.spin_once(sort_objects_node, timeout_sec=0.1)
+        rclpy.spin_once(sort_objects_node, timeout_sec=0.1)
 
         if fsm.current_state_index == StateID.S_EXIT:
             sort_objects_node.get_logger().info('FSM reached EXIT state, shutting down')
             break
         
+        reconfig_event_buffers(fsm.event_data)
         produce_event(fsm.event_data, EventID.E_STEP)
         fsm_behavior(fsm, ud, fsm_bhv, sort_objects_node)
-        reconfig_event_buffers(fsm.event_data)
         
-        fsm_step(fsm)
         reconfig_event_buffers(fsm.event_data)
+        fsm_step(fsm)
 
     
     sort_objects_node.destroy_node()
