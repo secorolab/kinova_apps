@@ -121,7 +121,7 @@ class RecorderThread(threading.Thread):
         self._stop_event.set()
 
 
-class RosPanel(QWidget):
+class RosTopicsPanel(QWidget):
     def __init__(self, *, context, exp: ExperimentManager, parent=None):
         super().__init__(parent)
         self.context = context
