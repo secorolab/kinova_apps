@@ -47,6 +47,10 @@ class EventID(IntEnum):
     E_GRIPPER_CONTROL_EXIT = auto()
     E_GC_SORTING_ENTER = auto()
     E_SORTING_EXIT_IDLE_ENTER = auto()
+    E_WAIT = auto()
+    E_CONTINUE = auto()
+    E_WAIT_ENTER = auto()
+    E_WAIT_EXIT = auto()
     E_STEP = auto()
 
 
@@ -60,6 +64,7 @@ class StateID(IntEnum):
     S_SORTING = auto()
     S_MOVE_ARM = auto()
     S_GRIPPER_CONTROL = auto()
+    S_WAIT = auto()
     S_EXIT = auto()
 
 
@@ -75,6 +80,9 @@ class TransitionID(IntEnum):
     T_SORTING_MOVE_ARM = auto()
     T_MOVE_ARM_GRIPPER_CONTROL = auto()
     T_GC_SORTING = auto()
+    T_SORTING_WAIT = auto()
+    T_WAIT_WAIT = auto()
+    T_WAIT_SORTING = auto()
     T_SORTING_IDLE = auto()
     T_IDLE_EXIT = auto()
 
@@ -91,8 +99,11 @@ class ReactionID(IntEnum):
     R_E_GRIPPER_CONTROL_EXIT = auto()
     R_E_SORTING_EXIT = auto()
     R_E_IDLE_EXIT = auto()
+    R_E_WAIT = auto()
+    R_E_WAIT_EXIT = auto()
     R_E_STEP1 = auto()
     R_E_STEP2 = auto()
+    R_E_STEP3 = auto()
 
 
 def create_fsm() -> FSMData:
@@ -109,6 +120,9 @@ def create_fsm() -> FSMData:
         TransitionID.T_SORTING_MOVE_ARM: Transition(StateID.S_SORTING, StateID.S_MOVE_ARM),
         TransitionID.T_MOVE_ARM_GRIPPER_CONTROL: Transition(StateID.S_MOVE_ARM, StateID.S_GRIPPER_CONTROL),
         TransitionID.T_GC_SORTING: Transition(StateID.S_GRIPPER_CONTROL, StateID.S_SORTING),
+        TransitionID.T_SORTING_WAIT: Transition(StateID.S_SORTING, StateID.S_WAIT),
+        TransitionID.T_WAIT_WAIT: Transition(StateID.S_WAIT, StateID.S_WAIT),
+        TransitionID.T_WAIT_SORTING: Transition(StateID.S_WAIT, StateID.S_SORTING),
         TransitionID.T_SORTING_IDLE: Transition(StateID.S_SORTING, StateID.S_IDLE),
         TransitionID.T_IDLE_EXIT: Transition(StateID.S_IDLE, StateID.S_EXIT),
     }
@@ -184,6 +198,20 @@ def create_fsm() -> FSMData:
             transition_index=TransitionID.T_IDLE_EXIT,
             fired_event_indices=[],
         ),
+        ReactionID.R_E_WAIT: EventReaction(
+            condition_event_index=EventID.E_WAIT,
+            transition_index=TransitionID.T_SORTING_WAIT,
+            fired_event_indices=[
+                EventID.E_WAIT_ENTER,
+            ],
+        ),
+        ReactionID.R_E_WAIT_EXIT: EventReaction(
+            condition_event_index=EventID.E_WAIT_EXIT,
+            transition_index=TransitionID.T_WAIT_SORTING,
+            fired_event_indices=[
+                EventID.E_CONTINUE,
+            ],
+        ),
         ReactionID.R_E_STEP1: EventReaction(
             condition_event_index=EventID.E_STEP,
             transition_index=TransitionID.T_START_CONFIGURE,
@@ -194,6 +222,11 @@ def create_fsm() -> FSMData:
         ReactionID.R_E_STEP2: EventReaction(
             condition_event_index=EventID.E_STEP,
             transition_index=TransitionID.T_IDLE_IDLE,
+            fired_event_indices=[],
+        ),
+        ReactionID.R_E_STEP3: EventReaction(
+            condition_event_index=EventID.E_STEP,
+            transition_index=TransitionID.T_WAIT_WAIT,
             fired_event_indices=[],
         ),
     }

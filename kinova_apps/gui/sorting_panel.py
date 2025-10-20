@@ -1,13 +1,20 @@
 import datetime
 from typing import List, Literal
+import threading
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal, SignalInstance
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QFormLayout, QPushButton, QCheckBox, QTextEdit, QMessageBox
 )
 
 from pydantic import BaseModel
+from enum import StrEnum
+
+from rclpy.node import Node
+from rclpy.executors import SingleThreadedExecutor
+
+from std_msgs.msg import String
 
 from kinova_apps.gui.camera_panel import CameraPanel
 from kinova_apps.gui.experiment_manager import ExperimentManager
@@ -28,6 +35,66 @@ class SortingResponse(BaseModel):
     reasoning: str
 
 
+class TaskStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    WAITING = "waiting"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    NONE = "none"
+
+
+class TaskControl(StrEnum):
+    START = "start"
+    STOP = "stop"
+    WAIT = "wait"
+    CONTINUE = "continue"
+
+
+class RosNode(Node):
+    def __init__(self, *, context=None, status_signal: SignalInstance):
+        super().__init__("sorting_task_node", context=context)
+        
+        self.pub_task_control = self.create_publisher(String, "sorting_task/control", 10)
+
+        self.status_signal = status_signal
+        self.sub_task_status = self.create_subscription(
+            String,
+            "sorting_task/status",
+            self._callback_task_status,
+            10
+        )
+
+        self.sorting_task_status: TaskStatus = TaskStatus.NONE
+
+    def _callback_task_status(self, msg: String):
+        self.sorting_task_status = TaskStatus(msg.data)
+        self.status_signal.emit()
+        # self.get_logger().info(f"Received task status: {self.sorting_task_status}")
+
+
+class RosThread(threading.Thread):
+    def __init__(self, *, context, node: RosNode):
+        super().__init__(daemon=True)
+        self.context = context
+        self._stop_event = threading.Event()
+        self._executor = None
+        self._node = node
+
+    def run(self):
+        self._executor = SingleThreadedExecutor(context=self.context)
+        self._executor.add_node(self._node)
+        
+        try:
+            while not self._stop_event.is_set():
+                self._executor.spin_once(timeout_sec=0.1)
+        finally:
+                self._executor.remove_node(self._node)
+                self._node.destroy_node()
+
+    def stop(self):
+        self._stop_event.set()
+
+
 class TaskPanel(QWidget):
     """
     Manages a 3-attempt pick-place sorting task.
@@ -43,10 +110,20 @@ class TaskPanel(QWidget):
     All logs dumped as JSON into experiment logs folder.
     """
     task_end_signal = Signal(name="task_end")
-    def __init__(self, camera: CameraPanel, exp: ExperimentManager, parent=None):
+    task_status_signal = Signal(name="task_status")
+    def __init__(self, camera: CameraPanel, exp: ExperimentManager, parent=None, context=None):
         super().__init__(parent)
+        
         self.camera = camera
         self.exp = exp
+        self.context = context
+
+        # ros node
+        self.ros_node = RosNode(context=self.context, status_signal=self.task_status_signal)
+        self.ros_node_thread = RosThread(context=self.context, node=self.ros_node)
+        self.ros_node_thread.start()
+
+        self.task_status_signal.connect(self._task_status_update)
 
         self.lbl_state = QLabel("Idle")
         self.lbl_state.setMinimumWidth(200)
@@ -57,7 +134,7 @@ class TaskPanel(QWidget):
         self.btn_continue.setEnabled(False)
 
         # Attempt index
-        self.attempt_idx = 0
+        self.attempt_idx = 1
         self.attempts: List[PickPlaceResponse] = []
         self.attempt_end_times: List[str] = []
 
@@ -106,6 +183,16 @@ class TaskPanel(QWidget):
         self.btn_start.clicked.connect(self._toggle_task)
         self.btn_continue.clicked.connect(self._continue_attempt)
 
+    def close(self):
+        self.ros_node_thread.stop()
+        self.ros_node_thread.join(timeout=2)
+        return super().close()
+
+    def _task_status_update(self):
+        self.lbl_state.setText(f"Task status: {self.ros_node.sorting_task_status.value}")
+        if self.ros_node.sorting_task_status == TaskStatus.WAITING:
+            self.btn_continue.setEnabled(True)
+
     def _row(self, *widgets):
         h = QHBoxLayout()
         for w in widgets:
@@ -115,24 +202,13 @@ class TaskPanel(QWidget):
     # ------------------ Mock control functions ------------------
 
     def _mock_send_start(self):
-        print("[MOCK] Sending START task signal")
-        self.lbl_state.setText("Attempt 1 in progress...")
-        QTimer.singleShot(2000, lambda: (
-            self.btn_continue.setEnabled(True),
-            self.lbl_state.setText("Attempt 1 finished. Click Continue when ready.")
-        ))
+        self.ros_node.pub_task_control.publish(String(data=TaskControl.CONTINUE.value))
 
     def _mock_send_stop(self):
-        print("[MOCK] Sending STOP task signal")
+        self.ros_node.pub_task_control.publish(String(data=TaskControl.CONTINUE.value))
 
     def _mock_send_continue(self, attempt_no: int):
-        print(f"[MOCK] Sending CONTINUE for attempt {attempt_no}")
-        # wait a bit and then enable continue button
-        self.lbl_state.setText(f"Attempt {attempt_no} in progress...")
-        QTimer.singleShot(2000, lambda: (
-            self.btn_continue.setEnabled(True),
-            self.lbl_state.setText(f"Attempt {attempt_no} finished. Click Continue when ready.")
-        ))
+        self.ros_node.pub_task_control.publish(String(data=TaskControl.CONTINUE.value))
 
     # ------------------ UI Logic ------------------
 
@@ -145,7 +221,7 @@ class TaskPanel(QWidget):
                 QMessageBox.warning(self, "Experiment", "Please select or create an experiment folder first.")
                 return
 
-            self.attempt_idx = 0
+            self.attempt_idx = 1
             self.attempts = []
             self.attempt_end_times = []
             self.lbl_state.setText("Task started. Waiting for first pick-place.")
@@ -224,7 +300,7 @@ class TaskPanel(QWidget):
         self.attempts.append(resp)
         self._reset_attempt_fields()
 
-        if self.attempt_idx < 3:
+        if self.attempt_idx <= 3:
             self.btn_continue.setEnabled(False)
             self.lbl_state.setText(f"Waiting for attempt {self.attempt_idx + 1}...")
             self._mock_send_continue(self.attempt_idx + 1)

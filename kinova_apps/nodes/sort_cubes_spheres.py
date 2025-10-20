@@ -7,6 +7,7 @@ from rclpy.utilities import ok as rclpy_ok
 from rclpy.duration import Duration
 from rclpy.wait_for_message import wait_for_message
 
+from std_msgs.msg import String
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
@@ -16,6 +17,7 @@ import numpy as np
 import open3d as o3d
 from pydantic import BaseModel
 from typing import Optional
+from enum import StrEnum
 
 import signal
 import sys
@@ -43,6 +45,21 @@ from kinova_apps.utils.detect_cubes_spheres_from_pc import (
 from kinova_moveit_client.action import MoveToCartesianPose, GripperCommand
 
 
+class TaskStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    WAITING = "waiting"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+
+
+class TaskControl(StrEnum):
+    START = "start"
+    STOP = "stop"
+    WAIT = "wait"
+    CONTINUE = "continue"
+    NONE = "none"
+
+
 class ActionFuture(BaseModel):
     send_goal_future: Optional[rclpy.task.Future] = None
     goal_handle: Optional[ClientGoalHandle] = None
@@ -55,16 +72,14 @@ class UserData(BaseModel):
     af: ActionFuture = ActionFuture()
     max_sort: int = 3
     num_sorted: int = 0
-    sort_data: Optional[list[ClusterInfo]] = []
-    target_position: Optional[list[float]] = None
+    sort_data: list[ClusterInfo] = []
+    target_position: list[float] = []
     gripper_open: bool = True
     target_objects: list[ClusterInfo] = []
-    move_arm: bool = False
-    return_event: Optional[EventID] = None
-    picked_objects: list[ClusterInfo] = []
     pick_object: bool = False
     place_object: bool = False
     detect_objects: bool = False
+    current_object: Optional[ClusterInfo] = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -77,6 +92,19 @@ class SortObjects(Node):
         self.logger.info('SortObjects node started')
 
     def configure(self):
+        # subscribers
+        self.exp_control_sub = self.create_subscription(
+            String,
+            'sorting_task/control',
+            self.exp_control_callback,
+            10
+        )
+
+        # timers
+        # self.task_status_timer = self.create_timer(0.01, self.publish_task_status)
+
+        # publishers
+        self.task_status_pub = self.create_publisher(String, 'sorting_task/status', 10)
         self.seg_plane_pub = self.create_publisher(PointCloud2, '/pc_plane', 10)
         self.pc_cluster_pub = self.create_publisher(PointCloud2, '/pc_cluster', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/detected_objects', 10)
@@ -85,16 +113,25 @@ class SortObjects(Node):
         self.move_to_pose_ac = ActionClient(self, MoveToCartesianPose, 'move_to_cartesian_pose')
         self.gripper_ac = ActionClient(self, GripperCommand, 'gripper_command')
 
+        self.exp_status_data = TaskStatus.NOT_STARTED
+        self.exp_control_data = TaskControl.WAIT
+
         self.logger.info('SortObjects node configured')
 
-    def detect_objects(self) -> bool:
+    # def publish_task_status(self):
+    #     msg = String()
+    #     msg.data = self.exp_status_data.value
+    #     self.task_status_pub.publish(msg)
+
+    def exp_control_callback(self, msg: String):
+        self.exp_control_data = TaskControl(msg.data)
+        self.logger.info(f'Received experiment control command: {self.exp_control_data}')
+
+    def detect_objects(self, target_objects: list[ClusterInfo]) -> bool:
         ret = False
         pc_msg: Optional[PointCloud2] = None
-        # while not ret:
+ 
         ret, pc_msg = wait_for_message(node=self, msg_type=PointCloud2, topic='/camera/depth/color/points', time_to_wait=1)
-        # if not rclpy_ok():
-        #     self.logger.info('Shutdown detected, exiting')
-        #     return
         if not ret:
             self.logger.info('Waiting for point cloud message...')
             return False
@@ -104,12 +141,17 @@ class SortObjects(Node):
         pc = point_cloud2.read_points_numpy(pc_msg, skip_nans=False, reshape_organized_cloud=True)
         # replace nan with 0
         pc = np.nan_to_num(pc, nan=0.0)
-        self.logger.info('Received synchronized messages')
 
         pc_header = pc_msg.header
 
         # object detection
         plane_cloud, obj_cluster_cloud, clusters = self.detect_pc_objects(pc)
+
+        # set target objects
+        target_objects.clear()
+        target_objects.extend(clusters)
+
+        # TODO: set the Z coordinate of the centroids to a fixed height for picking here?
         
         if len(clusters) == 0:
             self.logger.info('No objects detected, skipping publishing')
@@ -191,7 +233,7 @@ class SortObjects(Node):
         goal_msg.target_pose.pose.orientation.y = 0.0
         goal_msg.target_pose.pose.orientation.z = 0.0
         goal_msg.target_pose.pose.orientation.w = 1.0
-        goal_msg.target_pose.header.frame_id = 'base_link' # TODO: check
+        # goal_msg.target_pose.header.frame_id = 'base_link' # TODO: check
         goal_msg.target_pose.header.stamp = self.get_clock().now().to_msg()
         
         return goal_msg
@@ -267,11 +309,9 @@ class SortObjects(Node):
         af.get_result_future = None
         af.goal_handle = None
 
-    def move_arm(self, af, target_position):
+    def move_arm(self, af: ActionFuture, target_position: list[float]):
         self.logger.info('Picking object')
         
-        assert isinstance(target_position, list) and len(target_position) == 3, "target_position must be a list of 3 floats"
-
         move_arm_msg = self.get_move_arm_msg(target_position)
         # send goal to arm
         if not self.execute_action(self.move_to_pose_ac, af, move_arm_msg):
@@ -365,28 +405,34 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_SORTING_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
         ud.num_sorted = 0
+        ud.sort_data = []
         ud.detect_objects = True
         return False
+
+    if node.exp_control_data == TaskControl.WAIT:
+        node.logger.info('Experiment status is wait...', throttle_duration_sec=2.0)
+        produce_event(fsm.event_data, EventID.E_WAIT)
+        return False
+
+    if ud.num_sorted >= ud.max_sort:
+        node.logger.info(f'Sorted {ud.num_sorted} objects, exiting sorting')
+        node.exp_status_data = TaskStatus.COMPLETED
+        return True
 
     if ud.detect_objects:
         node.logger.info('Starting object detection for sorting')
         produce_event(fsm.event_data, EventID.E_SORTING_DETECT_OBJECTS)
         return False
 
-    if ud.num_sorted >= ud.max_sort:
-        node.logger.info(f'Sorted {ud.num_sorted} objects, exiting sorting')
-        return True
-
     if consume_event(fsm.event_data, EventID.E_DETECT_OBJECTS_SORTING):
-        # TODO: select next object to pick
-        
-        if ud.num_sorted < ud.max_sort:
-            # pick next object
-            ud.gripper_open = False # close gripper to pick after moving arm
-            ud.pick_object = True
-            ud.place_object = False
-            produce_event(fsm.event_data, EventID.E_MOVE_ARM)
+        assert len(ud.target_objects) > 0, "No target objects detected for sorting"
 
+        ud.current_object = ud.target_objects.pop()
+        ud.gripper_open = False # close gripper to pick after moving arm
+        ud.pick_object = True
+        ud.place_object = False
+        
+        produce_event(fsm.event_data, EventID.E_MOVE_ARM)
         return False
 
     if consume_event(fsm.event_data, EventID.E_GC_SORTING_ENTER):
@@ -401,19 +447,26 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
 
         if ud.place_object:
             ud.num_sorted += 1
-            node.logger.info(f'Placed {ud.num_sorted} object, picking next object')
-    
-            if ud.num_sorted >= ud.max_sort:
-                node.logger.info(f'Sorted {ud.num_sorted} objects, exiting sorting')
-                produce_event(fsm.event_data, EventID.E_SORTING_EXIT)
-                return False
+            assert ud.current_object is not None, "current_object is None"
+            ud.sort_data.append(ud.current_object)
 
-            ud.gripper_open = False # close gripper to pick after moving arm
-            ud.pick_object = True
             ud.place_object = False
-            produce_event(fsm.event_data, EventID.E_MOVE_ARM)
+            ud.pick_object = True
+            node.logger.info(f'Placed {ud.num_sorted} object.')
+
+            node.exp_control_data = TaskControl.WAIT
+            produce_event(fsm.event_data, EventID.E_WAIT)
             return False
-            
+
+    if not ud.place_object and ud.pick_object:
+        assert len(ud.target_objects) > 0, "No target objects detected for sorting"
+
+        ud.current_object = ud.target_objects.pop()
+        ud.gripper_open = False # close gripper to pick after moving arm
+        ud.pick_object = True
+        ud.place_object = False
+
+        produce_event(fsm.event_data, EventID.E_MOVE_ARM)
         return False
 
     return False
@@ -423,28 +476,69 @@ def detect_objects_step(fsm: FSMData, ud: UserData, node: SortObjects):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
         return False
 
-    return node.detect_objects()
+    # return node.detect_objects(ud.target_objects)
+    
+    if random.random() < 0.2:
+        return False
+
+    ud.detect_objects = False
+    demo_obj = ClusterInfo(
+        centroid=[0.5, 0.0, 0.2],
+        color=[1.0, 0.0, 0.0],
+        diameter=0.05,
+        object_class=ObjectClass.CUBE,
+        size=1000
+    )
+
+    ud.target_objects = [demo_obj for _ in range(ud.max_sort)]
+    return True
 
 
 def move_arm_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_MOVE_ARM_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
-
+        assert ud.current_object is not None, "current_object is None"
+        ud.target_position = ud.current_object.centroid
         return False
         
-    if not node.move_arm(ud.af, ud.target_position):
-        return False
+    # assert len(ud.target_position) == 3, "target_position must be a list of 3 floats"
+    # if not node.move_arm(ud.af, ud.target_position):
+    #     return False
+    #
+    # return True
 
-    return True
+    return random.random() < 0.8
 
 def gripper_control_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_GRIPPER_CONTROL_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
 
-    if not node.gripper_control(ud.af, ud.gripper_open):
+    # if not node.gripper_control(ud.af, ud.gripper_open):
+    #     return False
+    #
+    # return True
+
+    return random.random() < 0.8
+
+def wait_step(fsm: FSMData, ud: UserData, node: SortObjects):
+    if consume_event(fsm.event_data, EventID.E_WAIT_ENTER):
+        node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
+        if not node.exp_status_data == TaskStatus.NOT_STARTED:
+            node.exp_status_data = TaskStatus.WAITING
         return False
 
-    return True
+    if node.exp_control_data == TaskControl.CONTINUE:
+        node.logger.info('Experiment status is continue, resuming sorting')
+        node.exp_control_data = TaskControl.NONE
+        node.exp_status_data = TaskStatus.IN_PROGRESS
+        node.task_status_pub.publish(String(data=node.exp_status_data.value))
+        print(f'control_data: {node.exp_control_data}, status_data: {node.exp_status_data}')
+        return True
+
+    node.logger.info('Waiting for continue command...', throttle_duration_sec=2.0)
+    node.task_status_pub.publish(String(data=node.exp_status_data.value))
+
+    return False
 
 
 def main():
@@ -498,12 +592,18 @@ def main():
                 fsm, ud, [EventID.E_GRIPPER_CONTROL_EXIT]
             ),
         },
+        StateID.S_WAIT: {
+            "step": wait_step,
+            "on_end": lambda fsm, ud: generic_on_end(
+                fsm, ud, [EventID.E_WAIT_EXIT]
+            ),
+        },
     }
 
     ud = UserData()
 
     while rclpy_ok():
-        rclpy.spin_once(sort_objects_node, timeout_sec=0.1)
+        rclpy.spin_once(sort_objects_node, timeout_sec=0.01)
 
         if fsm.current_state_index == StateID.S_EXIT:
             sort_objects_node.get_logger().info('FSM reached EXIT state, shutting down')

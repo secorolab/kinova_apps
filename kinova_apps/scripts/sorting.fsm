@@ -1,7 +1,7 @@
 NAME: kinova_sorting
 DESCRIPTION: "A finite state machine for sorting cubes and spheres using a Kinova robotic arm."
 
-STATES: S_START, S_CONFIGURE, S_IDLE, S_HOME_ARM, S_DETECT_OBJECTS, S_SORTING, S_MOVE_ARM, S_GRIPPER_CONTROL, S_EXIT
+STATES: S_START, S_CONFIGURE, S_IDLE, S_HOME_ARM, S_DETECT_OBJECTS, S_SORTING, S_MOVE_ARM, S_GRIPPER_CONTROL, S_WAIT, S_EXIT
 
 START_STATE:   @S_START
 CURRENT_STATE: @S_START
@@ -30,6 +30,10 @@ EVENTS:
     E_GRIPPER_CONTROL_EXIT,
     E_GC_SORTING_ENTER,
     E_SORTING_EXIT_IDLE_ENTER,
+    E_WAIT,
+    E_CONTINUE,
+    E_WAIT_ENTER,
+    E_WAIT_EXIT,
     E_STEP
 
 TRANSITIONS:
@@ -62,6 +66,15 @@ TRANSITIONS:
         TO:   @S_GRIPPER_CONTROL
     T_GC_SORTING:
         FROM: @S_GRIPPER_CONTROL
+        TO:   @S_SORTING
+    T_SORTING_WAIT:
+        FROM: @S_SORTING
+        TO:   @S_WAIT
+    T_WAIT_WAIT:
+        FROM: @S_WAIT
+        TO:   @S_WAIT
+    T_WAIT_SORTING:
+        FROM: @S_WAIT
         TO:   @S_SORTING
     T_SORTING_IDLE:
         FROM: @S_SORTING
@@ -112,6 +125,15 @@ REACTIONS:
         WHEN:  @E_IDLE_EXIT
         DO:    @T_IDLE_EXIT
 
+    R_E_WAIT:
+        WHEN:  @E_WAIT
+        DO:    @T_SORTING_WAIT
+        FIRES: @E_WAIT_ENTER
+    R_E_WAIT_EXIT:
+        WHEN:  @E_WAIT_EXIT
+        DO:    @T_WAIT_SORTING
+        FIRES: @E_CONTINUE
+
     R_E_STEP1:
         WHEN:  @E_STEP
         DO:    @T_START_CONFIGURE
@@ -119,3 +141,6 @@ REACTIONS:
     R_E_STEP2:
         WHEN:  @E_STEP
         DO:    @T_IDLE_IDLE
+    R_E_STEP3:
+        WHEN:  @E_STEP
+        DO:    @T_WAIT_WAIT

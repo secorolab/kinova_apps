@@ -10,7 +10,7 @@ import qdarktheme
 from kinova_apps.gui.sorting_panel import TaskPanel
 from kinova_apps.gui.experiment_manager import ExperimentManager, ExpertimentsPanel
 from kinova_apps.gui.camera_panel import CameraPanel
-from kinova_apps.gui.ros_panel import RosPanel
+from kinova_apps.gui.ros_topics_panel import RosTopicsPanel
 
 
 class MainWindow(QMainWindow):
@@ -25,8 +25,8 @@ class MainWindow(QMainWindow):
         # Panels
         self.exp_panel = ExpertimentsPanel(self.exp)
         self.camera = CameraPanel(self.exp)
-        self.ros = RosPanel(context=context, exp=self.exp)
-        self.task = TaskPanel(self.camera, self.exp)
+        self.ros = RosTopicsPanel(context=context, exp=self.exp)
+        self.task = TaskPanel(self.camera, self.exp, context=context)
 
         central = QWidget()
         main_v = QVBoxLayout(central)
@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         self.camera.close()
         self.ros.close()
+        self.task.close()
         super().closeEvent(e)
 
 def main():
