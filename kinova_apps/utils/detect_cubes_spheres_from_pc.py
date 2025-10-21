@@ -119,7 +119,7 @@ def process_clusters_cube_sphere(
 
         centroid = pts.mean(axis=0)
         color_mean = cols.mean(axis=0)
-        z_range = pts[:, 2].ptp()
+        z_range = np.ptp(pts[:, 2])
         if z_range < params.z_range_thresh:
             continue
 

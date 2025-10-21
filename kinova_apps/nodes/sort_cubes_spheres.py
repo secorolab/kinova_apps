@@ -39,6 +39,7 @@ from kinova_apps.utils.pc_utils import cluster_pc, o3dpc_to_ros
 from kinova_apps.utils.detect_cubes_spheres_from_pc import (
     ObjectClass,
     ClusterInfo,
+    ColorLabel,
  process_clusters_cube_sphere
 )
 
@@ -148,8 +149,8 @@ class SortObjects(Node):
         plane_cloud, obj_cluster_cloud, clusters = self.detect_pc_objects(pc)
 
         # set target objects
-        target_objects.clear()
-        target_objects.extend(clusters)
+        # target_objects.clear()
+        # target_objects.extend(clusters)
 
         # TODO: set the Z coordinate of the centroids to a fixed height for picking here?
         
@@ -158,6 +159,26 @@ class SortObjects(Node):
             return False
 
         self.logger.info(f'Detected {len(clusters)} objects')
+
+        color_groups = {}
+        for cluster in clusters:
+            color_label = cluster.color_label
+            possible_colors = [ColorLabel.RED, ColorLabel.GREEN, ColorLabel.BLUE, ColorLabel.YELLOW]
+            if color_label not in color_groups and color_label in possible_colors:
+                color_groups[color_label] = []
+                color_groups[color_label].append(cluster)
+        
+        selected_colors = random.sample(list(color_groups.keys()), min(2, len(color_groups)))
+        filtered_clusters = []
+        for cluster in clusters:
+            if cluster.color_label in selected_colors:
+                filtered_clusters.append(cluster)
+
+        self.logger.info(f'Selected {len(filtered_clusters)} objects with colors {[cluster.color_label.value for cluster in filtered_clusters]}')
+
+        # set target objects
+        target_objects.clear()
+        target_objects.extend(filtered_clusters)
 
         self.seg_plane_pub.publish(o3dpc_to_ros(plane_cloud, pc_header.frame_id, pc_header.stamp))
         self.pc_cluster_pub.publish(o3dpc_to_ros(obj_cluster_cloud, pc_header.frame_id, pc_header.stamp))
@@ -476,12 +497,12 @@ def detect_objects_step(fsm: FSMData, ud: UserData, node: SortObjects):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
         return False
 
-    # return node.detect_objects(ud.target_objects)
+    ud.detect_objects = False
+    return node.detect_objects(ud.target_objects)
     
     if random.random() < 0.2:
         return False
 
-    ud.detect_objects = False
     demo_obj = ClusterInfo(
         centroid=[0.5, 0.0, 0.2],
         color=[1.0, 0.0, 0.0],
