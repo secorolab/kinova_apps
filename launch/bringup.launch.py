@@ -87,13 +87,13 @@ def launch_setup():
     # -----------------------  vision ----------------------------
 
     # vision bringup
-    if sl.arg('vision_bringup'):
-        sl.include('kinova_apps', 'vision_bringup.launch.py', 
-            launch_arguments={
-                'robot_ip': sl.arg('robot_ip'),
-                'prefix': sl.arg('prefix'),
-            }
-        )
+    # if sl.arg('vision_bringup'):
+    #     sl.include('kinova_apps', 'vision_bringup.launch.py', 
+    #         launch_arguments={
+    #             'robot_ip': sl.arg('robot_ip'),
+    #             'prefix': sl.arg('prefix'),
+    #         }
+    #     )
 
     # -----------------------  moveit ----------------------------
 

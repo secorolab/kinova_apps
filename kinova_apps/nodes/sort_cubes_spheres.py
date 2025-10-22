@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import time
 import rclpy
 import rclpy.task
 from rclpy.node import Node
@@ -12,6 +13,7 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from visualization_msgs.msg import Marker, MarkerArray
+from geometry_msgs.msg import Pose, PoseArray
 
 import numpy as np
 import open3d as o3d
@@ -109,6 +111,7 @@ class SortObjects(Node):
         self.seg_plane_pub = self.create_publisher(PointCloud2, '/pc_plane', 10)
         self.pc_cluster_pub = self.create_publisher(PointCloud2, '/pc_cluster', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/detected_objects', 10)
+        self.obj_pose_pub = self.create_publisher(PoseArray, '/detected_object_poses', 10)
 
         # action clients
         self.move_to_pose_ac = ActionClient(self, MoveToCartesianPose, 'move_to_cartesian_pose')
@@ -144,6 +147,7 @@ class SortObjects(Node):
         pc = np.nan_to_num(pc, nan=0.0)
 
         pc_header = pc_msg.header
+        # print(f"HEADER {pc_header.frame_id}")
 
         # object detection
         plane_cloud, obj_cluster_cloud, clusters = self.detect_pc_objects(pc)
@@ -173,6 +177,7 @@ class SortObjects(Node):
         for cluster in clusters:
             if cluster.color_label in selected_colors:
                 filtered_clusters.append(cluster)
+        filtered_clusters = filtered_clusters[:3]
 
         self.logger.info(f'Selected {len(filtered_clusters)} objects with colors {[cluster.color_label.value for cluster in filtered_clusters]}')
 
@@ -180,9 +185,29 @@ class SortObjects(Node):
         target_objects.clear()
         target_objects.extend(filtered_clusters)
 
+        pose_array = PoseArray()
+        pose_array.header = pc_header
+        pose_array.header.stamp = self.get_clock().now().to_msg()
+        for cluster in clusters:
+            centroid = cluster.centroid
+
+            pose = Pose()
+            pose.position.x = float(centroid[0])
+            pose.position.y = float(centroid[1])
+            pose.position.z = float(centroid[2])
+            pose.orientation.x = 0.0
+            pose.orientation.y = 0.0
+            pose.orientation.z = 0.0
+            pose.orientation.w = 1.0
+            pose_array.poses.append(pose)
+        
+        self.obj_pose_pub.publish(pose_array)
+
         self.seg_plane_pub.publish(o3dpc_to_ros(plane_cloud, pc_header.frame_id, pc_header.stamp))
         self.pc_cluster_pub.publish(o3dpc_to_ros(obj_cluster_cloud, pc_header.frame_id, pc_header.stamp))
         self.publish_markers(clusters, pc_header)
+
+        time.sleep(1.0)
 
         return True
 
@@ -249,12 +274,12 @@ class SortObjects(Node):
         goal_msg = MoveToCartesianPose.Goal()
         goal_msg.target_pose.pose.position.x = position[0]
         goal_msg.target_pose.pose.position.y = position[1]
-        goal_msg.target_pose.pose.position.z = position[2]
+        goal_msg.target_pose.pose.position.z = position[2] - 0.025
         goal_msg.target_pose.pose.orientation.x = 0.0
         goal_msg.target_pose.pose.orientation.y = 0.0
         goal_msg.target_pose.pose.orientation.z = 0.0
         goal_msg.target_pose.pose.orientation.w = 1.0
-        # goal_msg.target_pose.header.frame_id = 'base_link' # TODO: check
+        goal_msg.target_pose.header.frame_id = 'kinova_camera_color_frame'
         goal_msg.target_pose.header.stamp = self.get_clock().now().to_msg()
         
         return goal_msg
@@ -520,13 +545,14 @@ def move_arm_step(fsm: FSMData, ud: UserData, node: SortObjects):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
         assert ud.current_object is not None, "current_object is None"
         ud.target_position = ud.current_object.centroid
+        print(f"Target position: {ud.target_position}")
         return False
         
-    # assert len(ud.target_position) == 3, "target_position must be a list of 3 floats"
-    # if not node.move_arm(ud.af, ud.target_position):
-    #     return False
-    #
-    # return True
+    assert len(ud.target_position) == 3, "target_position must be a list of 3 floats"
+    if not node.move_arm(ud.af, ud.target_position):
+        return False
+    
+    return True
 
     return random.random() < 0.8
 
@@ -534,10 +560,10 @@ def gripper_control_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_GRIPPER_CONTROL_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
 
-    # if not node.gripper_control(ud.af, ud.gripper_open):
-    #     return False
-    #
-    # return True
+    if not node.gripper_control(ud.af, ud.gripper_open):
+        return False
+    
+    return True
 
     return random.random() < 0.8
 

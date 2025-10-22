@@ -8,14 +8,14 @@ def generate_launch_description():
     sl.declare_arg('prefix', '', description='Prefix for joint names, useful for multi-robot setup')
 
     sl.declare_arg('color_resolution',
+                    #  '320x240',
                     #  '640x480',
-                    #  '1280x720',
+                    '1280x720',
                     #  '1920x1080',
-                    "320x240",
                    description='Resolution for color calibration')
     sl.declare_arg('depth_resolution', 
-                    #  '480x270',
-                   '424x240',
+                    #  '424x240',
+                    '480x270',
                    description='Resolution for depth calibration')
     sl.declare_arg('depth_registration', 'true',
                    description='Enable depth registration')
