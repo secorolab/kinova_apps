@@ -36,7 +36,7 @@ class CameraPanel(QWidget):
         self.view = QLabel("Camera feed")
         self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.view.setMinimumSize(QSize(480, 320))
-        self.view.setScaledContents(True)
+        self.view.setScaledContents(False)
 
         h = QHBoxLayout()
         h.addWidget(self.url_input, 1)
@@ -97,6 +97,8 @@ class CameraPanel(QWidget):
     def start(self):
         url = self.url_input.currentText().strip()
         self.cap = cv2.VideoCapture(url)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         if not self.cap.isOpened():
             self.view.setText("Failed to open stream.")
             if self.cap:
@@ -185,7 +187,13 @@ class CameraPanel(QWidget):
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = frame_rgb.shape
         qimg = QImage(frame_rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
-        self.view.setPixmap(QPixmap.fromImage(qimg))
+        pixmap = QPixmap.fromImage(qimg)
+        scaled_pixmap = pixmap.scaled(
+            self.view.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.view.setPixmap(scaled_pixmap)
 
     def close(self):
         self.stop()
