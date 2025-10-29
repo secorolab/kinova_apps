@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
-    QComboBox, QPushButton, QMessageBox
+    QComboBox, QPushButton, QMessageBox, QSizePolicy
 )
 
 from kinova_apps.gui.experiment_manager import ExperimentManager
@@ -35,8 +35,10 @@ class CameraPanel(QWidget):
 
         self.view = QLabel("Camera feed")
         self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.view.setMinimumSize(QSize(480, 320))
+        self.view.setMinimumSize(320, 240)
+        self.view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.view.setScaledContents(False)
+        self.view.setStyleSheet("background-color: black;")
 
         h = QHBoxLayout()
         h.addWidget(self.url_input, 1)
@@ -95,6 +97,9 @@ class CameraPanel(QWidget):
         return devices
 
     def start(self):
+        # set the max camera view size to help with aspect ratio
+        self.view.setMaximumHeight(self.view.height())
+
         url = self.url_input.currentText().strip()
         self.cap = cv2.VideoCapture(url)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -184,15 +189,26 @@ class CameraPanel(QWidget):
             if self._ensure_writer(frame):
                 self.vwriter.write(frame)
 
+        view_size = self.view.size()
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = frame_rgb.shape
+        view_aspect = view_size.width() / view_size.height()
+        frame_aspect = w / h
+
+        if view_aspect > frame_aspect:
+            new_h = view_size.height()
+            new_w = int(frame_aspect * new_h)
+        else:
+            new_w = view_size.width()
+            new_h = int(new_w / frame_aspect)
+
         qimg = QImage(frame_rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
         pixmap = QPixmap.fromImage(qimg)
+
         scaled_pixmap = pixmap.scaled(
-            self.view.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+            QSize(new_w, new_h), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         )
+        
         self.view.setPixmap(scaled_pixmap)
 
     def close(self):

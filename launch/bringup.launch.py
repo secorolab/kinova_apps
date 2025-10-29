@@ -96,7 +96,8 @@ def launch_setup():
     #     )
 
     # -----------------------  moveit ----------------------------
-
+    rviz_moveit_params = []
+    
     if sl.arg('moveit_configs_pkg'):
         moveit_pkg = sl.arg('moveit_configs_pkg')
 
@@ -118,6 +119,7 @@ def launch_setup():
             parameters=[moveit_config.to_dict()]
         )
 
+        # needed to show moveit markers
         rviz_moveit_params = [
             moveit_config.robot_description,
             moveit_config.robot_description_semantic,
@@ -138,8 +140,7 @@ def launch_setup():
             name='rviz2',
             output='screen',
             arguments=['-d', rviz_config_file],
-            # the below parameters are needed to show the moveit markers
-            parameters=rviz_moveit_params if sl.arg('moveit_configs_pkg') else []
+            parameters=rviz_moveit_params
         )
 
     return sl.launch_description()
