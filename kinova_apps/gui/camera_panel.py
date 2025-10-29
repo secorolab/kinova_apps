@@ -1,3 +1,4 @@
+import glob
 import os
 import datetime
 from typing import List, Optional
@@ -8,7 +9,7 @@ from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
-    QLineEdit, QPushButton, QMessageBox
+    QComboBox, QPushButton, QMessageBox
 )
 
 from kinova_apps.gui.experiment_manager import ExperimentManager
@@ -19,7 +20,11 @@ class CameraPanel(QWidget):
         super().__init__(parent)
         self.exp = exp
 
-        self.url_input = QLineEdit("http://192.168.0.101:8080/video")
+        self.url_input = QComboBox()
+        self.url_input.setEditable(True)
+        devices = self.get_camera_devices()
+        if devices:
+            self.url_input.addItems(devices)
         self.start_btn = QPushButton("Start Feed")
         self.stop_btn = QPushButton("Stop Feed")
         self.stop_btn.setEnabled(False)
@@ -79,8 +84,18 @@ class CameraPanel(QWidget):
         self.videos_dir = os.path.join(run_dir, "videos")
         os.makedirs(self.videos_dir, exist_ok=True)
 
+    def get_camera_devices(self) -> List[str]:
+        devices = []
+        video_devices = glob.glob('/dev/video*')
+        for device_path in sorted(video_devices):
+            cap = cv2.VideoCapture(device_path)
+            if cap.isOpened():
+                devices.append(device_path)
+                cap.release()
+        return devices
+
     def start(self):
-        url = self.url_input.text().strip()
+        url = self.url_input.currentText().strip()
         self.cap = cv2.VideoCapture(url)
         if not self.cap.isOpened():
             self.view.setText("Failed to open stream.")
