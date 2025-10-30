@@ -13,7 +13,7 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Pose, PoseArray
+from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 
 import numpy as np
 import open3d as o3d
@@ -112,6 +112,7 @@ class SortObjects(Node):
         self.pc_cluster_pub = self.create_publisher(PointCloud2, '/pc_cluster', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/detected_objects', 10)
         self.obj_pose_pub = self.create_publisher(PoseArray, '/detected_object_poses', 10)
+        self.current_obj_pose_pub = self.create_publisher(PoseStamped, '/current_object_pose', 10)
 
         # action clients
         self.move_to_pose_ac = ActionClient(self, MoveToCartesianPose, 'move_to_cartesian_pose')
@@ -261,6 +262,20 @@ class SortObjects(Node):
 
         self.marker_pub.publish(marker_array)
 
+    def publish_current_object_pose(self, centroid: list[float]):
+        obj_pose = PoseStamped()
+        obj_pose.header.frame_id = 'kinova_camera_color_frame'
+        obj_pose.header.stamp = self.get_clock().now().to_msg()
+        obj_pose.pose.position.x = float(centroid[0])
+        obj_pose.pose.position.y = float(centroid[1])
+        obj_pose.pose.position.z = float(centroid[2])
+        obj_pose.pose.orientation.x = 0.0
+        obj_pose.pose.orientation.y = 0.0
+        obj_pose.pose.orientation.z = 0.0
+        obj_pose.pose.orientation.w = 1.0
+
+        self.current_obj_pose_pub.publish(obj_pose)
+
     def home_arm(self):
         self.logger.info('Homing arm (simulated)')
         
@@ -277,8 +292,8 @@ class SortObjects(Node):
         goal_msg.target_pose.pose.position.z = position[2] - 0.025
         goal_msg.target_pose.pose.orientation.x = 0.0
         goal_msg.target_pose.pose.orientation.y = 0.0
-        goal_msg.target_pose.pose.orientation.z = 0.0
-        goal_msg.target_pose.pose.orientation.w = 1.0
+        goal_msg.target_pose.pose.orientation.z = 1.0
+        goal_msg.target_pose.pose.orientation.w = 0.0
         goal_msg.target_pose.header.frame_id = 'kinova_camera_color_frame'
         goal_msg.target_pose.header.stamp = self.get_clock().now().to_msg()
         
@@ -477,6 +492,8 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
         ud.gripper_open = False # close gripper to pick after moving arm
         ud.pick_object = True
         ud.place_object = False
+
+        node.publish_current_object_pose(ud.current_object.centroid)
         
         produce_event(fsm.event_data, EventID.E_MOVE_ARM)
         return False
