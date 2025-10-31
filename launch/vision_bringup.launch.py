@@ -1,11 +1,13 @@
+from launch.actions import OpaqueFunction
 from simple_launch import SimpleLauncher, get_package_share_directory
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 def generate_launch_description():
     sl = SimpleLauncher()
 
     # Declare arguments
     sl.declare_arg('robot_ip', '192.168.1.12', description='IP address of the Kinova robot')
-    sl.declare_arg('prefix', '', description='Prefix for joint names, useful for multi-robot setup')
+    sl.declare_arg('prefix', 'kinova_', description='Prefix for joint names, useful for multi-robot setup')
 
     sl.declare_arg('color_resolution',
                     #  '320x240',
@@ -25,7 +27,7 @@ def generate_launch_description():
     color_calib = calibration_dir + '/default_color_calib_' + sl.arg('color_resolution') + '.ini'
     depth_calib = calibration_dir + '/default_depth_calib_' + sl.arg('depth_resolution') + '.ini'
 
-    sl.include('kinova_vision', 'kinova_vision.launch.py',
+    kv = sl.include('kinova_vision', 'kinova_vision.launch.py',
         launch_arguments={
             'device': sl.arg('robot_ip'),
             'camera_link_frame_id': sl.arg('prefix') + 'camera_link',
@@ -35,6 +37,17 @@ def generate_launch_description():
             'color_camera_info_url': 'file://' + color_calib,
             'depth_camera_info_url': 'file://' + depth_calib,
         })
+
+    # INFO: Assumes that corresponding static tf is disabled in kinova_vision.launch.py
+    sl.node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        arguments=['-0.01', '-0.005', '0', 
+                     '0', '0', '0', 
+                     sl.arg('prefix') + 'camera_link', 
+                     sl.arg('prefix') + 'camera_depth_frame'],
+        output='screen'
+    )
 
     return sl.launch_description()
 

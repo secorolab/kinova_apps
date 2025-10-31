@@ -1,4 +1,5 @@
 from simple_launch import SimpleLauncher, get_package_share_directory
+from simple_launch.events import When, OnProcessStart, OnProcessExit
 from moveit_configs_utils import MoveItConfigsBuilder
 
 
@@ -10,7 +11,7 @@ sl.declare_arg('xacro_file', default_value='pick_place.xacro', description='Path
 sl.declare_arg('robot_ip', '192.168.1.12', description='IP address of the Kinova robot')
 sl.declare_arg('prefix', 'kinova_', description='Prefix for joint names, useful for multi-robot setup')
 sl.declare_arg('gripper', 'robotiq_2f_85', description='Type of gripper: robotiq_2f_85 or none')
-sl.declare_arg('vision_bringup', True, description='Whether to launch vision bringup')
+sl.declare_arg('vision_bringup', False, description='Whether to launch vision bringup')
 
 sl.declare_arg('use_rviz', True, description='Whether to launch RViz')
 sl.declare_arg('rviz_config_file', default_value=get_package_share_directory('kinova_apps') + '/config/rviz/default.rviz',
@@ -87,13 +88,13 @@ def launch_setup():
     # -----------------------  vision ----------------------------
 
     # vision bringup
-    # if sl.arg('vision_bringup'):
-    #     sl.include('kinova_apps', 'vision_bringup.launch.py', 
-    #         launch_arguments={
-    #             'robot_ip': sl.arg('robot_ip'),
-    #             'prefix': sl.arg('prefix'),
-    #         }
-    #     )
+    if sl.arg('vision_bringup'):
+        sl.include('kinova_apps', 'vision_bringup.launch.py', 
+            launch_arguments={
+                'robot_ip': sl.arg('robot_ip'),
+                'prefix': sl.arg('prefix'),
+            }
+        )
 
     # -----------------------  moveit ----------------------------
     rviz_moveit_params = []
@@ -104,6 +105,9 @@ def launch_setup():
         # moveit
         moveit_config = (
             MoveItConfigsBuilder("gen3_2f_85_pick_place", package_name=moveit_pkg)
+            .robot_description(mappings={
+                "prefix": sl.arg('prefix'),
+            })
             .planning_scene_monitor(
                 publish_robot_description=True, publish_robot_description_semantic=True
             )
@@ -111,7 +115,8 @@ def launch_setup():
             .planning_pipelines(pipelines=["ompl", "pilz_industrial_motion_planner"])
             .to_moveit_configs()
         )
-
+        
+        # with sl.group(when=When(nFaultC, OnProcessExit)):
         sl.node(
             package="moveit_ros_move_group",
             executable="move_group",
