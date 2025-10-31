@@ -50,40 +50,42 @@ from kinova_moveit_client.action import MoveToCartesianPose, GripperCommand
 
 class TaskStatus(StrEnum):
     NOT_STARTED = "not_started"
-    WAITING = "waiting"
+    WAITING     = "waiting"
     IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
+    COMPLETED   = "completed"
 
 
 class TaskControl(StrEnum):
-    START = "start"
-    STOP = "stop"
-    WAIT = "wait"
+    START    = "start"
+    STOP     = "stop"
+    WAIT     = "wait"
     CONTINUE = "continue"
-    NONE = "none"
+    REDO     = "redo"
+    NONE     = "none"
 
 
 class ActionFuture(BaseModel):
-    send_goal_future: Optional[rclpy.task.Future] = None
-    goal_handle: Optional[ClientGoalHandle] = None
+    send_goal_future: Optional[rclpy.task.Future]  = None
+    goal_handle: Optional[ClientGoalHandle]        = None
     get_result_future: Optional[rclpy.task.Future] = None
 
     class Config:
         arbitrary_types_allowed = True
 
-class UserData(BaseModel):
-    af: ActionFuture = ActionFuture()
-    max_sort: int = 3
-    num_sorted: int = 0
-    sort_data: list[ClusterInfo] = []
-    target_position: list[float] = []
-    gripper_open: bool = True
-    target_objects: list[ClusterInfo] = []
-    pick_object: bool = False
-    place_object: bool = False
-    detect_objects: bool = False
-    current_object: Optional[ClusterInfo] = None
 
+class UserData(BaseModel):
+    af: ActionFuture                      = ActionFuture()
+    max_sort: int                         = 3
+    num_sorted: int                       = 0
+    sort_data: list[ClusterInfo]          = []
+    target_position: list[float]          = []
+    gripper_open: bool                    = True
+    target_objects: list[ClusterInfo]     = []
+    pick_object: bool                     = False
+    place_object: bool                    = False
+    detect_objects: bool                  = False
+    current_object: Optional[ClusterInfo] = None
+    
     class Config:
         arbitrary_types_allowed = True
 
@@ -107,18 +109,18 @@ class SortObjects(Node):
         # self.task_status_timer = self.create_timer(0.01, self.publish_task_status)
 
         # publishers
-        self.task_status_pub = self.create_publisher(String, 'sorting_task/status', 10)
-        self.seg_plane_pub = self.create_publisher(PointCloud2, '/pc_plane', 10)
-        self.pc_cluster_pub = self.create_publisher(PointCloud2, '/pc_cluster', 10)
-        self.marker_pub = self.create_publisher(MarkerArray, '/detected_objects', 10)
-        self.obj_pose_pub = self.create_publisher(PoseArray, '/detected_object_poses', 10)
+        self.task_status_pub      = self.create_publisher(String, 'sorting_task/status', 10)
+        self.seg_plane_pub        = self.create_publisher(PointCloud2, '/pc_plane', 10)
+        self.pc_cluster_pub       = self.create_publisher(PointCloud2, '/pc_cluster', 10)
+        self.marker_pub           = self.create_publisher(MarkerArray, '/detected_objects', 10)
+        self.obj_pose_pub         = self.create_publisher(PoseArray, '/detected_object_poses', 10)
         self.current_obj_pose_pub = self.create_publisher(PoseStamped, '/current_object_pose', 10)
 
         # action clients
         self.move_to_pose_ac = ActionClient(self, MoveToCartesianPose, 'move_to_cartesian_pose')
-        self.gripper_ac = ActionClient(self, GripperCommand, 'gripper_command')
+        self.gripper_ac      = ActionClient(self, GripperCommand, 'gripper_command')
 
-        self.exp_status_data = TaskStatus.NOT_STARTED
+        self.exp_status_data  = TaskStatus.NOT_STARTED
         self.exp_control_data = TaskControl.WAIT
 
         self.logger.info('SortObjects node configured')
@@ -542,21 +544,6 @@ def detect_objects_step(fsm: FSMData, ud: UserData, node: SortObjects):
     ud.detect_objects = False
     return node.detect_objects(ud.target_objects)
     
-    if random.random() < 0.2:
-        return False
-
-    demo_obj = ClusterInfo(
-        centroid=[0.5, 0.0, 0.2],
-        color=[1.0, 0.0, 0.0],
-        diameter=0.05,
-        object_class=ObjectClass.CUBE,
-        size=1000
-    )
-
-    ud.target_objects = [demo_obj for _ in range(ud.max_sort)]
-    return True
-
-
 def move_arm_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_MOVE_ARM_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
@@ -571,8 +558,6 @@ def move_arm_step(fsm: FSMData, ud: UserData, node: SortObjects):
     
     return True
 
-    return random.random() < 0.8
-
 def gripper_control_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_GRIPPER_CONTROL_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
@@ -581,8 +566,6 @@ def gripper_control_step(fsm: FSMData, ud: UserData, node: SortObjects):
         return False
     
     return True
-
-    return random.random() < 0.8
 
 def wait_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_WAIT_ENTER):
@@ -596,7 +579,6 @@ def wait_step(fsm: FSMData, ud: UserData, node: SortObjects):
         node.exp_control_data = TaskControl.NONE
         node.exp_status_data = TaskStatus.IN_PROGRESS
         node.task_status_pub.publish(String(data=node.exp_status_data.value))
-        print(f'control_data: {node.exp_control_data}, status_data: {node.exp_status_data}')
         return True
 
     node.logger.info('Waiting for continue command...', throttle_duration_sec=2.0)
