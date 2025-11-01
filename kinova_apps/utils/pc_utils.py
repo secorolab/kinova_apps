@@ -92,6 +92,14 @@ def cluster_pc(
     # --- Downsample ---
     downpcd = o3d_pc.voxel_down_sample(voxel_size=params.voxel_size)
 
+    # remove Z points that are too close
+    distances = np.asarray(downpcd.points)[:, 2]
+    mask = distances < 0.05  # 1 cm threshold
+    downpcd = downpcd.select_by_index(np.where(~mask)[0])
+    if len(downpcd.points) == 0:
+        print("[PC Utils] No points left after filtering")
+        return o3d.geometry.PointCloud(), o3d.geometry.PointCloud(), np.array([])
+
     # --- Plane segmentation ---
     _, inliers = downpcd.segment_plane(
         distance_threshold=params.plane_seg.plane_dist_thresh,
