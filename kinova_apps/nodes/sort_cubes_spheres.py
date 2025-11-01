@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import time
 import rclpy
+import rclpy.time
 import rclpy.task
 from rclpy.node import Node
 from rclpy.action.client import ActionClient, ClientGoalHandle
@@ -8,12 +9,17 @@ from rclpy.utilities import ok as rclpy_ok
 from rclpy.duration import Duration
 from rclpy.wait_for_message import wait_for_message
 
+from tf2_ros import TransformListener, Buffer
+from tf2_geometry_msgs import TransformStamped, do_transform_pose_stamped
+from tf2_sensor_msgs import do_transform_cloud
+
 from std_msgs.msg import String
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
+from example_interfaces.srv import Trigger
 
 import numpy as np
 import open3d as o3d
@@ -42,11 +48,15 @@ from kinova_apps.utils.detect_cubes_spheres_from_pc import (
     ObjectClass,
     ClusterInfo,
     ColorLabel,
- process_clusters_cube_sphere
+    process_clusters_cube_sphere
 )
 
 from kinova_moveit_client.action import MoveToCartesianPose, GripperCommand
 
+
+WORLD_FRAME = 'world'
+BASE_FRAME  = 'kinova_base_link'
+NUM_OBJECTS = 3
 
 class TaskStatus(StrEnum):
     NOT_STARTED = "not_started"
@@ -56,12 +66,13 @@ class TaskStatus(StrEnum):
 
 
 class TaskControl(StrEnum):
-    START    = "start"
-    STOP     = "stop"
-    WAIT     = "wait"
-    CONTINUE = "continue"
-    REDO     = "redo"
-    NONE     = "none"
+    START         = "start"
+    STOP          = "stop"
+    WAIT          = "wait"
+    CONTINUE      = "continue"
+    REDO_DETECT   = "redo_detect"
+    START_SORTING = "start_sorting"
+    NONE          = "none"
 
 
 class ActionFuture(BaseModel):
@@ -105,6 +116,10 @@ class SortObjects(Node):
             10
         )
 
+        # tf2
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         # timers
         # self.task_status_timer = self.create_timer(0.01, self.publish_task_status)
 
@@ -120,6 +135,12 @@ class SortObjects(Node):
         self.move_to_pose_ac = ActionClient(self, MoveToCartesianPose, 'move_to_cartesian_pose')
         self.gripper_ac      = ActionClient(self, GripperCommand, 'gripper_command')
 
+        # reset_fault service
+        # self.reset_fault_srv = self.create_client(Trigger, '/fault_controller/reset_fault')
+        # while not self.reset_fault_srv.wait_for_service(timeout_sec=1.0):
+        #     self.logger.info('Waiting for reset_fault service...')
+        # self.logger.info('Connected to reset_fault service')
+
         self.exp_status_data  = TaskStatus.NOT_STARTED
         self.exp_control_data = TaskControl.WAIT
 
@@ -129,6 +150,19 @@ class SortObjects(Node):
     #     msg = String()
     #     msg.data = self.exp_status_data.value
     #     self.task_status_pub.publish(msg)
+
+    def get_transform(self, from_frame: str, to_frame: str) -> Optional[TransformStamped]:
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                to_frame,
+                from_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=1.0)
+            )
+            return transform
+        except Exception as e:
+            self.logger.error(f'Error getting transform from {from_frame} to {to_frame}: {e}')
+            return None
 
     def exp_control_callback(self, msg: String):
         self.exp_control_data = TaskControl(msg.data)
@@ -150,47 +184,31 @@ class SortObjects(Node):
         pc = np.nan_to_num(pc, nan=0.0)
 
         pc_header = pc_msg.header
-        # print(f"HEADER {pc_header.frame_id}")
 
         # object detection
         plane_cloud, obj_cluster_cloud, clusters = self.detect_pc_objects(pc)
 
-        # set target objects
-        # target_objects.clear()
-        # target_objects.extend(clusters)
-
-        # TODO: set the Z coordinate of the centroids to a fixed height for picking here?
-        
         if len(clusters) == 0:
             self.logger.info('No objects detected, skipping publishing')
-            return False
+            return True
 
         self.logger.info(f'Detected {len(clusters)} objects')
 
-        color_groups = {}
-        for cluster in clusters:
-            color_label = cluster.color_label
-            possible_colors = [ColorLabel.RED, ColorLabel.GREEN, ColorLabel.BLUE, ColorLabel.YELLOW]
-            if color_label not in color_groups and color_label in possible_colors:
-                color_groups[color_label] = []
-                color_groups[color_label].append(cluster)
-        
-        selected_colors = random.sample(list(color_groups.keys()), min(2, len(color_groups)))
-        filtered_clusters = []
-        for cluster in clusters:
-            if cluster.color_label in selected_colors:
-                filtered_clusters.append(cluster)
-        filtered_clusters = filtered_clusters[:3]
+        # check WORLD_FRAME exists in tf2
+        assert self.get_transform(WORLD_FRAME, WORLD_FRAME) is not None, f"TF2 does not have {WORLD_FRAME} frame"
+        assert self.get_transform(BASE_FRAME, BASE_FRAME) is not None, f"TF2 does not have {BASE_FRAME} frame"
 
-        self.logger.info(f'Selected {len(filtered_clusters)} objects with colors {[cluster.color_label.value for cluster in filtered_clusters]}')
+        world_transform = self.get_transform(pc_header.frame_id, WORLD_FRAME)
+        assert world_transform is not None, "transform return None"
 
-        # set target objects
-        target_objects.clear()
-        target_objects.extend(filtered_clusters)
+        base_transform = self.get_transform(BASE_FRAME, WORLD_FRAME)
+        assert base_transform is not None, "transform return None"
+
+        current_time = self.get_clock().now().to_msg()
 
         pose_array = PoseArray()
-        pose_array.header = pc_header
-        pose_array.header.stamp = self.get_clock().now().to_msg()
+        pose_array.header = world_transform.header
+        pose_array.header.stamp = current_time
         for cluster in clusters:
             centroid = cluster.centroid
 
@@ -202,13 +220,54 @@ class SortObjects(Node):
             pose.orientation.y = 0.0
             pose.orientation.z = 0.0
             pose.orientation.w = 1.0
-            pose_array.poses.append(pose)
-        
-        self.obj_pose_pub.publish(pose_array)
 
-        self.seg_plane_pub.publish(o3dpc_to_ros(plane_cloud, pc_header.frame_id, pc_header.stamp))
-        self.pc_cluster_pub.publish(o3dpc_to_ros(obj_cluster_cloud, pc_header.frame_id, pc_header.stamp))
-        self.publish_markers(clusters, pc_header)
+            pose_stamped = PoseStamped()
+            pose_stamped.header = pc_header
+            pose_stamped.header.stamp = current_time
+            pose_stamped.pose = pose
+            pose_stamped_world = do_transform_pose_stamped(pose_stamped, world_transform)
+            cluster.world_position = [
+                pose_stamped_world.pose.position.x,
+                pose_stamped_world.pose.position.y,
+                pose_stamped_world.pose.position.z
+            ]
+            pose_array.poses.append(pose_stamped_world.pose)
+        
+        possible_colors = [ColorLabel.RED, ColorLabel.GREEN, ColorLabel.BLUE, ColorLabel.YELLOW]
+        detected_colors = {cluster.color_label for cluster in clusters if cluster.color_label in possible_colors}
+        if len(detected_colors) < 2:
+            self.logger.info('Not enough different colors detected, skipping publishing')
+            return False
+        selected_colors = random.sample(list(detected_colors), 2)
+        filtered_clusters = [cluster for cluster in clusters if cluster.color_label in selected_colors]
+        # get NUM_OBJECTS clusters
+        filtered_clusters = filtered_clusters[:NUM_OBJECTS]
+        if len(filtered_clusters) != NUM_OBJECTS:
+            self.logger.info(f'Not enough objects after filtering, found {len(filtered_clusters)}, need {NUM_OBJECTS}, skipping publishing')
+            return True
+
+        self.logger.info(f'Selections:')
+        for cluster in filtered_clusters:
+            world_position = cluster.world_position
+            assert len(world_position) == 3, "world_position must be a list of 3 floats"
+            world_position[2] = base_transform.transform.translation.z + 0.025  # TODO: adjust for gripper height
+            self.logger.info(f'    {cluster.object_class} - {cluster.color_label:<6}: WPos: {[round(v, 3) for v in world_position]}')
+
+        # set target objects
+        target_objects.clear()
+        target_objects.extend(filtered_clusters)
+        self.logger.info(f'Set {len(target_objects)} target objects for sorting')
+
+        plane_cloud = o3dpc_to_ros(plane_cloud, pc_header.frame_id, pc_header.stamp)
+        obj_cluster_cloud = o3dpc_to_ros(obj_cluster_cloud, pc_header.frame_id, pc_header.stamp)
+        
+        plane_cloud_world = do_transform_cloud(plane_cloud, world_transform)
+        obj_cluster_cloud_world = do_transform_cloud(obj_cluster_cloud, world_transform)
+       
+        self.seg_plane_pub.publish(plane_cloud_world)
+        self.pc_cluster_pub.publish(obj_cluster_cloud_world)
+        self.obj_pose_pub.publish(pose_array)
+        self.publish_markers(filtered_clusters, pose_array.header)
 
         time.sleep(1.0)
 
@@ -220,12 +279,14 @@ class SortObjects(Node):
 
         return plane_cloud, obj_cluster_cloud, clusters
 
-    def publish_markers(self, clusters: list[ClusterInfo], pc_header: Header):
+    def publish_markers(self, clusters: list[ClusterInfo], header: Header):
         marker_array = MarkerArray()
         marker_id = 0
+        assert len(clusters) > 0, "No clusters to publish markers for"
         for cluster in clusters:
 
-            centroid = cluster.centroid
+            world_position = cluster.world_position
+            assert world_position is not None, "world_position is None"
 
             if cluster.object_class == ObjectClass.CUBE:
                 object_class = Marker.CUBE
@@ -246,10 +307,11 @@ class SortObjects(Node):
             marker.scale.y = object_scale
             marker.scale.z = object_scale
 
-            marker.header = pc_header
-            marker.pose.position.x = float(centroid[0])
-            marker.pose.position.y = float(centroid[1])
-            marker.pose.position.z = float(centroid[2])
+            marker.header = header
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.pose.position.x = float(world_position[0])
+            marker.pose.position.y = float(world_position[1])
+            marker.pose.position.z = float(world_position[2])
 
             # marker color from cluster color
             color = cluster.color
@@ -258,19 +320,18 @@ class SortObjects(Node):
             marker.color.b = float(color[2])
 
             marker.color.a = 1.0
-            marker.lifetime = Duration(seconds=0).to_msg()
             marker_array.markers.append(marker)
             marker_id += 1
 
         self.marker_pub.publish(marker_array)
 
-    def publish_current_object_pose(self, centroid: list[float]):
+    def publish_current_object_pose(self, wPos: list[float]):
         obj_pose = PoseStamped()
-        obj_pose.header.frame_id = 'kinova_camera_color_frame'
+        obj_pose.header.frame_id = WORLD_FRAME
         obj_pose.header.stamp = self.get_clock().now().to_msg()
-        obj_pose.pose.position.x = float(centroid[0])
-        obj_pose.pose.position.y = float(centroid[1])
-        obj_pose.pose.position.z = float(centroid[2])
+        obj_pose.pose.position.x = float(wPos[0])
+        obj_pose.pose.position.y = float(wPos[1])
+        obj_pose.pose.position.z = float(wPos[2])
         obj_pose.pose.orientation.x = 0.0
         obj_pose.pose.orientation.y = 0.0
         obj_pose.pose.orientation.z = 0.0
@@ -291,12 +352,12 @@ class SortObjects(Node):
         goal_msg = MoveToCartesianPose.Goal()
         goal_msg.target_pose.pose.position.x = position[0]
         goal_msg.target_pose.pose.position.y = position[1]
-        goal_msg.target_pose.pose.position.z = position[2] - 0.025
+        goal_msg.target_pose.pose.position.z = position[2]
         goal_msg.target_pose.pose.orientation.x = 0.0
         goal_msg.target_pose.pose.orientation.y = 0.0
-        goal_msg.target_pose.pose.orientation.z = 1.0
-        goal_msg.target_pose.pose.orientation.w = 0.0
-        goal_msg.target_pose.header.frame_id = 'kinova_camera_color_frame'
+        goal_msg.target_pose.pose.orientation.z = 0.0
+        goal_msg.target_pose.pose.orientation.w = 1.0
+        goal_msg.target_pose.header.frame_id = WORLD_FRAME
         goal_msg.target_pose.header.stamp = self.get_clock().now().to_msg()
         
         return goal_msg
@@ -328,7 +389,9 @@ class SortObjects(Node):
 
         # send goal
         if af.send_goal_future is None:
+            self.logger.info('Sending goal to action server...')
             af.send_goal_future = ac.send_goal_async(goal_msg)
+            assert af.send_goal_future is not None, "send_goal_future is None"
             return False
 
         # wait for goal to be accepted
@@ -345,7 +408,6 @@ class SortObjects(Node):
 
             self.logger.info("Goal accepted")
             af.get_result_future = af.goal_handle.get_result_async()
-            af.send_goal_future = None
             return False
 
         # wait for result
@@ -354,11 +416,11 @@ class SortObjects(Node):
             return False
 
         if not af.get_result_future.done():
-            self.logger.info("Waiting for result...")
+            self.logger.info("Waiting for result...", throttle_duration_sec=5.0)
             return False
 
         result = af.get_result_future.result()
-        self.logger.info(f'Action result: {result}')
+        self.logger.info(f'Action result: {result.result}')
         
         # reset action future for next use
         self.reset_action_future(af)
@@ -373,8 +435,6 @@ class SortObjects(Node):
         af.goal_handle = None
 
     def move_arm(self, af: ActionFuture, target_position: list[float]):
-        self.logger.info('Picking object')
-        
         move_arm_msg = self.get_move_arm_msg(target_position)
         # send goal to arm
         if not self.execute_action(self.move_to_pose_ac, af, move_arm_msg):
@@ -383,12 +443,12 @@ class SortObjects(Node):
         return True
 
     def gripper_control(self, af, open: bool):
-        val = 0.9 if open else 0.0
+        val = 1.0 if open else 0.0
 
         gripper_msg = self.get_gripper_cmd_msg(val)
         # send goal to gripper
-        if not self.execute_action(self.gripper_ac, af, gripper_msg):
-            return False
+        # if not self.execute_action(self.gripper_ac, af, gripper_msg):
+            # return False
 
         return True
 
@@ -487,7 +547,7 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
         produce_event(fsm.event_data, EventID.E_SORTING_DETECT_OBJECTS)
         return False
 
-    if consume_event(fsm.event_data, EventID.E_DETECT_OBJECTS_SORTING):
+    if consume_event(fsm.event_data, EventID.E_START_SORTING):
         assert len(ud.target_objects) > 0, "No target objects detected for sorting"
 
         ud.current_object = ud.target_objects.pop()
@@ -495,7 +555,7 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
         ud.pick_object = True
         ud.place_object = False
 
-        node.publish_current_object_pose(ud.current_object.centroid)
+        node.publish_current_object_pose(ud.current_object.world_position)
         
         produce_event(fsm.event_data, EventID.E_MOVE_ARM)
         return False
@@ -548,14 +608,21 @@ def move_arm_step(fsm: FSMData, ud: UserData, node: SortObjects):
     if consume_event(fsm.event_data, EventID.E_MOVE_ARM_ENTER):
         node.logger.info(f"Entered state '{StateID(fsm.current_state_index).name}'")
         assert ud.current_object is not None, "current_object is None"
-        ud.target_position = ud.current_object.centroid
-        print(f"Target position: {ud.target_position}")
+        assert ud.current_object.world_position is not None, "current_object.world_position is None"
+        if ud.pick_object:
+            ud.target_position = ud.current_object.world_position
+            node.logger.info(f"Target position: {ud.target_position}")
+            node.logger.info(f"Moving arm to target position...")
+        if ud.place_object:
+            node.logger.warn("Placing position is not implemented, returning")
+            return True
         return False
         
     assert len(ud.target_position) == 3, "target_position must be a list of 3 floats"
     if not node.move_arm(ud.af, ud.target_position):
         return False
     
+    ud.target_position = []
     return True
 
 def gripper_control_step(fsm: FSMData, ud: UserData, node: SortObjects):
@@ -574,6 +641,21 @@ def wait_step(fsm: FSMData, ud: UserData, node: SortObjects):
             node.exp_status_data = TaskStatus.WAITING
         return False
 
+    if node.exp_control_data == TaskControl.REDO_DETECT:
+        node.logger.info('Experiment control is redo_detect, redoing object detection')
+        node.exp_control_data = TaskControl.NONE
+        node.exp_status_data = TaskStatus.IN_PROGRESS
+        ud.detect_objects = True
+        produce_event(fsm.event_data, EventID.E_DETECT_OBJECTS_REDO)
+        return False
+
+    if node.exp_control_data == TaskControl.START_SORTING:
+        node.logger.info('Experiment status is start, starting sorting')
+        node.exp_control_data = TaskControl.NONE
+        node.exp_status_data = TaskStatus.IN_PROGRESS
+        produce_event(fsm.event_data, EventID.E_DETECT_OBJECTS_SORTING)
+        return False
+
     if node.exp_control_data == TaskControl.CONTINUE:
         node.logger.info('Experiment status is continue, resuming sorting')
         node.exp_control_data = TaskControl.NONE
@@ -581,7 +663,7 @@ def wait_step(fsm: FSMData, ud: UserData, node: SortObjects):
         node.task_status_pub.publish(String(data=node.exp_status_data.value))
         return True
 
-    node.logger.info('Waiting for continue command...', throttle_duration_sec=2.0)
+    node.logger.info('Waiting for continue command...', throttle_duration_sec=20.0)
     node.task_status_pub.publish(String(data=node.exp_status_data.value))
 
     return False
