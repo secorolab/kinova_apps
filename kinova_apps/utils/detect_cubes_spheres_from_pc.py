@@ -28,10 +28,11 @@ class ClusterInfo(BaseModel):
     size: int
     diameter: float
     color_label: ColorLabel = ColorLabel.UNKNOWN
+    world_position: list[float]
 
 
 class CubeSphereParams(BaseModel):
-    outlier_percentiles: tuple = (5, 97)
+    outlier_percentiles: tuple = (2, 97)
     fcluster_thresh: float = 1000.0
     z_range_thresh: float = 0.0065
 
@@ -48,7 +49,8 @@ def process_clusters_cube_sphere(
     cluster_sizes = dict(zip(unique_labels, counts))
 
     sizes = np.array(list(cluster_sizes.values()))
-    low, high = np.percentile(sizes, params.outlier_percentiles)
+    _, high = np.percentile(sizes, params.outlier_percentiles)
+    low = 100
     kept_clusters = [lbl for lbl, sz in cluster_sizes.items() if low <= sz <= high]
     # sort by size descending
     kept_clusters.sort(key=lambda x: cluster_sizes[x])
@@ -65,8 +67,8 @@ def process_clusters_cube_sphere(
 
     # --- Hierarchical grouping by cluster size ---
     kept_sizes = np.array([cluster_sizes[lbl] for lbl in kept_clusters]).reshape(-1, 1)
-    print(kept_sizes)
-    print(cluster_sizes)
+    print(f"[PC Utils] Cluster sizes: {len(cluster_sizes)}: {dict(sorted(cluster_sizes.items(), key=lambda x: x[1]))}")
+    print(f"[PC Utils] Kept sizes:    {len(kept_sizes)}: {kept_sizes.flatten().tolist()}")
 
     cluster_z_mins = {}
     for lbl in kept_clusters:
@@ -75,10 +77,10 @@ def process_clusters_cube_sphere(
         z_min = pts[:, 2].min()
         cluster_z_mins[lbl] = z_min
 
-    for lbl in sorted(kept_clusters, key=lambda x: cluster_sizes[x]):
-        size = cluster_sizes[lbl]
-        z_min = cluster_z_mins[lbl]
-        print(f"Cluster {lbl} size={size}, z_min={z_min}")
+    # for lbl in sorted(kept_clusters, key=lambda x: cluster_sizes[x]):
+    #     size = cluster_sizes[lbl]
+    #     z_min = cluster_z_mins[lbl]
+    #     print(f"Cluster {lbl} size={size}, z_min={z_min}")
 
     Z = linkage(kept_sizes, method="ward")
     groups = fcluster(Z, t=params.fcluster_thresh, criterion="distance")
@@ -137,6 +139,7 @@ def process_clusters_cube_sphere(
         cluster_info = ClusterInfo(
             object_class=object_class,
             centroid=centroid.tolist(),
+            world_position=[],
             color=color_mean.tolist(),
             size=cluster_sizes[lbl],
             diameter=round(diameter, 3),
