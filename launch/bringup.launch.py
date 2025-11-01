@@ -117,12 +117,16 @@ def launch_setup():
         )
         
         # with sl.group(when=When(nFaultC, OnProcessExit)):
-        sl.node(
+        mg = sl.node(
             package="moveit_ros_move_group",
             executable="move_group",
             output="screen",
             parameters=[moveit_config.to_dict()]
         )
+
+        with sl.group(when=When(mg, OnProcessStart)):
+            # launch moveit client
+            sl.node('kinova_moveit_client', 'client_node', output='screen')
 
         # needed to show moveit markers
         rviz_moveit_params = [
@@ -147,6 +151,17 @@ def launch_setup():
             arguments=['-d', rviz_config_file],
             parameters=rviz_moveit_params
         )
+
+    # INFO: Assumes that corresponding static tf is disabled in kinova_vision.launch.py
+    sl.node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        arguments=['-0.01', '-0.005', '0', 
+                    '0', '0', '0', 
+                    sl.arg('prefix') + 'camera_link', 
+                    sl.arg('prefix') + 'camera_depth_frame'],
+        output='screen'
+    )
 
     return sl.launch_description()
 

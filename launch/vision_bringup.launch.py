@@ -38,16 +38,7 @@ def generate_launch_description():
             'depth_camera_info_url': 'file://' + depth_calib,
         })
 
-    # INFO: Assumes that corresponding static tf is disabled in kinova_vision.launch.py
-    sl.node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        arguments=['-0.01', '-0.005', '0', 
-                     '0', '0', '0', 
-                     sl.arg('prefix') + 'camera_link', 
-                     sl.arg('prefix') + 'camera_depth_frame'],
-        output='screen'
-    )
+
 
     return sl.launch_description()
 
