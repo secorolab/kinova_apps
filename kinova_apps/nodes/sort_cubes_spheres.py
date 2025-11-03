@@ -57,6 +57,12 @@ from kinova_moveit_client.action import MoveToCartesianPose, GripperCommand
 WORLD_FRAME = 'world'
 BASE_FRAME  = 'kinova_base_link'
 NUM_OBJECTS = 3
+PICK_Z_OFFSET = 0.015 + 0.05
+# INFO:
+# since the RGB-DEPTH offset persists, its set to [0,0,0] which works for now
+# we need to apply this translation to correct EE pose after pose estimation
+DEPTH_OFFSET_TRANSLATION = [-0.026, -0.0, 0.0]
+
 
 class TaskStatus(StrEnum):
     NOT_STARTED = "not_started"
@@ -231,6 +237,10 @@ class SortObjects(Node):
                 pose_stamped_world.pose.position.y,
                 pose_stamped_world.pose.position.z
             ]
+            # apply depth offset correction
+            cluster.world_position[0] += DEPTH_OFFSET_TRANSLATION[0]
+            cluster.world_position[1] += DEPTH_OFFSET_TRANSLATION[1]
+            cluster.world_position[2] += DEPTH_OFFSET_TRANSLATION[2]
             pose_array.poses.append(pose_stamped_world.pose)
         
         possible_colors = [ColorLabel.RED, ColorLabel.GREEN, ColorLabel.BLUE, ColorLabel.YELLOW]
@@ -250,7 +260,7 @@ class SortObjects(Node):
         for cluster in filtered_clusters:
             world_position = cluster.world_position
             assert len(world_position) == 3, "world_position must be a list of 3 floats"
-            world_position[2] = base_transform.transform.translation.z + 0.025  # TODO: adjust for gripper height
+            world_position[2] = base_transform.transform.translation.z + PICK_Z_OFFSET  # TODO: adjust for gripper height
             self.logger.info(f'    {cluster.object_class} - {cluster.color_label:<6}: WPos: {[round(v, 3) for v in world_position]}')
 
         # set target objects
@@ -447,8 +457,8 @@ class SortObjects(Node):
 
         gripper_msg = self.get_gripper_cmd_msg(val)
         # send goal to gripper
-        # if not self.execute_action(self.gripper_ac, af, gripper_msg):
-            # return False
+        if not self.execute_action(self.gripper_ac, af, gripper_msg):
+            return False
 
         return True
 

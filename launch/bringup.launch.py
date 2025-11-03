@@ -109,7 +109,7 @@ def launch_setup():
                 "prefix": sl.arg('prefix'),
             })
             .planning_scene_monitor(
-                publish_robot_description=True, publish_robot_description_semantic=True
+                publish_robot_description=False, publish_robot_description_semantic=True
             )
             .trajectory_execution(file_path="config/moveit_controllers.yaml")
             .planning_pipelines(pipelines=["ompl", "pilz_industrial_motion_planner"])
@@ -151,17 +151,6 @@ def launch_setup():
             arguments=['-d', rviz_config_file],
             parameters=rviz_moveit_params
         )
-
-    # INFO: Assumes that corresponding static tf is disabled in kinova_vision.launch.py
-    sl.node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        arguments=['-0.01', '-0.005', '0', 
-                    '0', '0', '0', 
-                    sl.arg('prefix') + 'camera_link', 
-                    sl.arg('prefix') + 'camera_depth_frame'],
-        output='screen'
-    )
 
     return sl.launch_description()
 
