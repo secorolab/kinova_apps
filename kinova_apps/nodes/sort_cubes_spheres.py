@@ -101,6 +101,7 @@ class UserData(BaseModel):
     pick_object: bool                     = False
     place_object: bool                    = False
     detect_objects: bool                  = False
+    started_experiment: bool              = False
     current_object: Optional[ClusterInfo] = None
     
     class Config:
@@ -651,6 +652,14 @@ def wait_step(fsm: FSMData, ud: UserData, node: SortObjects):
             node.exp_status_data = TaskStatus.WAITING
         return False
 
+    if node.exp_control_data == TaskControl.START and not ud.started_experiment:
+        node.logger.info('Experiment control is start, starting sorting')
+        node.exp_control_data = TaskControl.NONE
+        node.exp_status_data = TaskStatus.IN_PROGRESS
+        ud.started_experiment = True
+        node.task_status_pub.publish(String(data=node.exp_status_data.value))
+        return True
+
     if node.exp_control_data == TaskControl.REDO_DETECT:
         node.logger.info('Experiment control is redo_detect, redoing object detection')
         node.exp_control_data = TaskControl.NONE
@@ -673,7 +682,10 @@ def wait_step(fsm: FSMData, ud: UserData, node: SortObjects):
         node.task_status_pub.publish(String(data=node.exp_status_data.value))
         return True
 
-    node.logger.info('Waiting for continue command...', throttle_duration_sec=20.0)
+    if not ud.started_experiment:
+        node.logger.info('Waiting for start command...', throttle_duration_sec=20.0)
+    else:
+        node.logger.info('Waiting for continue command...', throttle_duration_sec=20.0)
     node.task_status_pub.publish(String(data=node.exp_status_data.value))
 
     return False
