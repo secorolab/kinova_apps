@@ -5,7 +5,7 @@ import threading
 from PySide6.QtCore import Qt, Signal, SignalInstance
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
-    QFormLayout, QPushButton, QCheckBox, QTextEdit, QMessageBox
+    QFormLayout, QPushButton, QCheckBox, QTextEdit, QMessageBox, QScrollArea
 )
 
 from pydantic import BaseModel
@@ -47,19 +47,25 @@ class TaskControl(StrEnum):
     START = "start"
     STOP = "stop"
     WAIT = "wait"
+    START_SORTING = "start_sorting"
     CONTINUE = "continue"
+    REDO_DETECT = "redo_detect"
 
 
 class RosNode(Node):
     def __init__(self, *, context=None, status_signal: SignalInstance):
         super().__init__("sorting_task_node", context=context)
+
+        self.task_control_topic = "sorting_task/control"
+        self.task_status_topic  = "sorting_task/status"
+        self.detections_topic   = "sorting_task/detections"
         
-        self.pub_task_control = self.create_publisher(String, "sorting_task/control", 10)
+        self.pub_task_control = self.create_publisher(String, self.task_control_topic, 10)
 
         self.status_signal = status_signal
         self.sub_task_status = self.create_subscription(
             String,
-            "sorting_task/status",
+            self.task_status_topic,
             self._callback_task_status,
             10
         )
@@ -125,63 +131,100 @@ class TaskPanel(QWidget):
 
         self.task_status_signal.connect(self._task_status_update)
 
+         # --- State & Control Buttons ---
         self.lbl_state = QLabel("Idle")
         self.lbl_state.setMinimumWidth(200)
         self.lbl_state.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
         self.btn_start = QPushButton("Start Task")
-        self.btn_start.setStyleSheet("")
         self.btn_continue = QPushButton("Continue")
-        self.btn_continue.setEnabled(False)
+        self.btn_start_sorting = QPushButton("Start Sorting")
 
-        # Attempt index
+        # hide continue button and start sorting initially
+        # self.btn_continue.hide()
+        # self.btn_start_sorting.hide()
+
+        # --- Attempt tracking ---
         self.attempt_idx = 1
-        self.attempts: List[PickPlaceResponse] = []
-        self.attempt_end_times: List[str] = []
+        self.attempts = []
+        self.attempt_end_times = []
 
-        # Response controls
+        # --- Response controls ---
         self.chk_pickplace_failed = QCheckBox("pickplace_failed")
         self.chk_unsafe = QCheckBox("unsafe")
         self.txt_reason = QTextEdit()
         self.txt_reason.setPlaceholderText("Reasoning for this attempt...")
 
-        # Final sorting fields
+        # --- Final sorting fields ---
         self.chk_wrong_sorting = QCheckBox("wrong_sorting")
         self.txt_sort_reason = QTextEdit()
         self.txt_sort_reason.setPlaceholderText("Final sorting reasoning...")
 
+        # --- Detections box ---
+        self.lbl_detections = QLabel("No detections yet.")
+        self.lbl_detections.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.brn_redo_detections = QPushButton("Redo Detections")
+
+        v_detections = QVBoxLayout()
+        v_detections.addWidget(self.lbl_detections)
+        v_detections.addWidget(self.brn_redo_detections, alignment=Qt.AlignmentFlag.AlignRight)
+        detections_box = QGroupBox("Current Detections")
+        detections_box.setLayout(v_detections)
+
+        # --- Attempt form ---
         form_attempt = QFormLayout()
         form_attempt.addRow("", self._row(self.chk_pickplace_failed, self.chk_unsafe))
         form_attempt.addRow("Reasoning:", self.txt_reason)
 
-        form_final = QFormLayout()
-        form_final.addRow("", self.chk_wrong_sorting)
-        form_final.addRow("Reasoning:", self.txt_sort_reason)
-
-        row_btns = QHBoxLayout()
-        row_btns.addWidget(self.btn_start)
-        row_btns.addWidget(self.lbl_state)
-        row_btns.addSpacing(20)
-        row_btns.addWidget(self.btn_continue)
-        row_btns.addStretch(1)
-
-        self.box_attempt = QGroupBox("Pick-Place Attempt #1")
+        self.box_attempt = QGroupBox(f"Pick-Place Attempt #{self.attempt_idx}")
         v_attempt = QVBoxLayout()
         v_attempt.addLayout(form_attempt)
         self.box_attempt.setLayout(v_attempt)
+
+        # --- Final sorting form ---
+        form_final = QFormLayout()
+        form_final.addRow("", self.chk_wrong_sorting)
+        form_final.addRow("Reasoning:", self.txt_sort_reason)
 
         box_final = QGroupBox("Final Sorting Response")
         v_final = QVBoxLayout()
         v_final.addLayout(form_final)
         box_final.setLayout(v_final)
 
-        lay = QVBoxLayout(self)
-        lay.addLayout(row_btns)
-        lay.addWidget(self.box_attempt)
-        lay.addWidget(box_final)
+        # --- Top control bar ---
+        row_btns = QHBoxLayout()
+        row_btns.addWidget(self.btn_start)
+        row_btns.addWidget(self.lbl_state)
+        row_btns.addSpacing(20)
+        row_btns.addWidget(self.btn_start_sorting)
+        row_btns.addWidget(self.btn_continue)
+        row_btns.addStretch(1)
+
+        # --- Main attempt area ---
+        attemptLay = QHBoxLayout()
+        attemptLay.addWidget(self.box_attempt, stretch=1)
+        attemptLay.addWidget(box_final, stretch=1)
+
+        # --- Scroll area for forms (so they never hide other elements) ---
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.addWidget(detections_box)
+        scroll_layout.addLayout(attemptLay)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(scroll_content)
+
+        # --- Root layout (fixed top bar, scrollable rest) ---
+        root = QVBoxLayout(self)
+        root.addLayout(row_btns)
+        root.addWidget(scroll)
 
         # Connections
         self.btn_start.clicked.connect(self._toggle_task)
         self.btn_continue.clicked.connect(self._continue_attempt)
+        self.brn_redo_detections.clicked.connect(self._send_redo_detections)
+        self.btn_start_sorting.clicked.connect(self._send_start_sorting)
 
     def close(self):
         self.ros_node_thread.stop()
@@ -197,17 +240,25 @@ class TaskPanel(QWidget):
         h = QHBoxLayout()
         for w in widgets:
             h.addWidget(w)
+        h.addStretch(1)
         return h
 
-    # ------------------ Mock control functions ------------------
+    # ------------------ control functions ------------------
 
-    def _mock_send_start(self):
+    def _send_redo_detections(self):
+        self.ros_node.pub_task_control.publish(String(data=TaskControl.REDO_DETECT.value))
+
+    def _send_start(self):
+        self.ros_node.pub_task_control.publish(String(data=TaskControl.START.value))
+        self.btn_start_sorting.show()
+
+    def _send_stop(self):
         self.ros_node.pub_task_control.publish(String(data=TaskControl.CONTINUE.value))
 
-    def _mock_send_stop(self):
-        self.ros_node.pub_task_control.publish(String(data=TaskControl.CONTINUE.value))
+    def _send_start_sorting(self):
+        self.ros_node.pub_task_control.publish(String(data=TaskControl.START_SORTING.value))
 
-    def _mock_send_continue(self, attempt_no: int):
+    def _send_continue(self, attempt_no: int):
         self.ros_node.pub_task_control.publish(String(data=TaskControl.CONTINUE.value))
 
     # ------------------ UI Logic ------------------
@@ -230,7 +281,7 @@ class TaskPanel(QWidget):
             self.btn_continue.setEnabled(False)
             self.btn_continue.show()
             self.box_attempt.setTitle("Pick-Place Attempt #1")
-            self._mock_send_start()
+            self._send_start()
 
             # Start video recording if available
             if self.camera.cap and self.camera.cap.isOpened():
@@ -247,7 +298,7 @@ class TaskPanel(QWidget):
             self.btn_start.setText("Start Task")
             self.btn_start.setStyleSheet("")
             self.btn_continue.setEnabled(False)
-            self._mock_send_stop()
+            self._send_stop()
 
             # Stop video recording
             self.camera.stop_recording()
@@ -303,7 +354,7 @@ class TaskPanel(QWidget):
         if self.attempt_idx <= 3:
             self.btn_continue.setEnabled(False)
             self.lbl_state.setText(f"Waiting for attempt {self.attempt_idx + 1}...")
-            self._mock_send_continue(self.attempt_idx + 1)
+            self._send_continue(self.attempt_idx + 1)
             self.camera.mark_event(f"attempt_{self.attempt_idx + 1}_start")
             self.box_attempt.setTitle(f"Pick-Place Attempt #{self.attempt_idx + 1}")
         else:

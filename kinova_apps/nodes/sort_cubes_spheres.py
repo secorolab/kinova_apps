@@ -558,7 +558,7 @@ def sorting_step(fsm: FSMData, ud: UserData, node: SortObjects):
         produce_event(fsm.event_data, EventID.E_SORTING_DETECT_OBJECTS)
         return False
 
-    if consume_event(fsm.event_data, EventID.E_START_SORTING):
+    if consume_event(fsm.event_data, EventID.E_START_SORTING_ENTER):
         assert len(ud.target_objects) > 0, "No target objects detected for sorting"
 
         ud.current_object = ud.target_objects.pop()
@@ -672,7 +672,7 @@ def wait_step(fsm: FSMData, ud: UserData, node: SortObjects):
         node.logger.info('Experiment status is start, starting sorting')
         node.exp_control_data = TaskControl.NONE
         node.exp_status_data = TaskStatus.IN_PROGRESS
-        produce_event(fsm.event_data, EventID.E_DETECT_OBJECTS_SORTING)
+        produce_event(fsm.event_data, EventID.E_START_SORTING)
         return False
 
     if node.exp_control_data == TaskControl.CONTINUE:

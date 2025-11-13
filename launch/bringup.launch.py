@@ -8,7 +8,7 @@ sl = SimpleLauncher()
 # Declare arguments
 sl.declare_arg('xacro_file', default_value='pick_place.xacro', description='Path to the xacro file to load')
 
-sl.declare_arg('robot_ip', '192.168.1.12', description='IP address of the Kinova robot')
+sl.declare_arg('robot_ip', '192.168.1.10', description='IP address of the Kinova robot')
 sl.declare_arg('prefix', 'kinova_', description='Prefix for joint names, useful for multi-robot setup')
 sl.declare_arg('gripper', 'robotiq_2f_85', description='Type of gripper: robotiq_2f_85 or none')
 sl.declare_arg('vision_bringup', False, description='Whether to launch vision bringup')

@@ -7,7 +7,7 @@
   <xacro:arg name="fake_sensor_commands" default="false" />
   <xacro:arg name="robot_ip" default="" />
   <xacro:arg name="gripper_joint_name" default="" />
-  <xacro:arg name="prefix" default="" />
+  <xacro:arg name="prefix" default="kinova_" />
   
   <xacro:property name="PI" value="3.14159265359" />
 
@@ -44,6 +44,34 @@
 
   <!-- world -->
   <link name="world"/>
+
+  <xacro:property name="wall_height" value="2.0" />
+  <xacro:property name="wall_Y_offset" value="${table_top_breadth/2 + (table_leg_breadth/2)}" />
+  <xacro:property name="wall_Y" value="${wall_Y_offset + 0.3 - 0.025}" />
+
+  <!-- wall -->
+  <link name="wall">
+    <visual>
+      <origin xyz="0 ${-wall_Y} ${wall_height/2} " rpy="0 0 0"/>
+      <geometry>
+        <box size="${wall_height*1.5} 0.05 ${wall_height}"/>
+      </geometry>
+      <material name="not_white">
+        <color rgba="0.7 0.7 0.7 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 ${-wall_Y} ${wall_height/2} " rpy="0 0 0"/>
+      <geometry>
+        <box size="${wall_height*1.5} 0.05 ${wall_height}"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="wall_joint" type="fixed">
+    <parent link="world"/>
+    <child link="wall"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
 
   <!-- table -->
   <xacro:table prefix="${table_prefix}"
