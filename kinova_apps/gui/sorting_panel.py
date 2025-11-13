@@ -1,11 +1,14 @@
 import datetime
 from typing import List, Literal
 import threading
+import json
 
-from PySide6.QtCore import Qt, Signal, SignalInstance
+from PySide6 import QtGui
+from PySide6.QtCore import Qt, Signal, SignalInstance, QEnum
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
-    QFormLayout, QPushButton, QCheckBox, QTextEdit, QMessageBox, QScrollArea
+    QFormLayout, QPushButton, QCheckBox, QTextEdit, QMessageBox, QScrollArea,
+    QTableWidget, QTableWidgetItem
 )
 
 from pydantic import BaseModel
@@ -53,15 +56,19 @@ class TaskControl(StrEnum):
 
 
 class RosNode(Node):
-    def __init__(self, *, context=None, status_signal: SignalInstance):
+    def __init__(self, *, 
+                 context=None,
+                 status_signal: SignalInstance,
+                 selections_signal: SignalInstance
+    ):
         super().__init__("sorting_task_node", context=context)
 
         self.task_control_topic = "sorting_task/control"
         self.task_status_topic  = "sorting_task/status"
-        self.detections_topic   = "sorting_task/detections"
-        
+        self.selections_topic   = "sorting_task/selections"
+         
         self.pub_task_control = self.create_publisher(String, self.task_control_topic, 10)
-
+ 
         self.status_signal = status_signal
         self.sub_task_status = self.create_subscription(
             String,
@@ -70,12 +77,28 @@ class RosNode(Node):
             10
         )
 
+        self.selections = None
+        self.selections_signal = selections_signal
+        self.sub_selections = self.create_subscription(
+            String,
+            self.selections_topic,
+            self._callback_selections,
+            1
+        )
+
         self.sorting_task_status: TaskStatus = TaskStatus.NONE
 
     def _callback_task_status(self, msg: String):
         self.sorting_task_status = TaskStatus(msg.data)
         self.status_signal.emit()
-        # self.get_logger().info(f"Received task status: {self.sorting_task_status}")
+
+    def _callback_selections(self, msg: String):
+        json_string = msg.data
+        try:
+            self.selections = json.loads(json_string)
+            self.selections_signal.emit()
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f"Failed to decode selections JSON: {e}")
 
 
 class RosThread(threading.Thread):
@@ -101,6 +124,14 @@ class RosThread(threading.Thread):
         self._stop_event.set()
 
 
+COLOR_MAP = {
+    "yellow": "#FFD700",
+    "blue":   "#4DA6FF",
+    "red":    "#FF6666",
+    "green":  "#66FF99",
+}
+
+
 class TaskPanel(QWidget):
     """
     Manages a 3-attempt pick-place sorting task.
@@ -117,6 +148,7 @@ class TaskPanel(QWidget):
     """
     task_end_signal = Signal(name="task_end")
     task_status_signal = Signal(name="task_status")
+    selections_signal = Signal(name="selections_update")
     def __init__(self, camera: CameraPanel, exp: ExperimentManager, parent=None, context=None):
         super().__init__(parent)
         
@@ -125,7 +157,11 @@ class TaskPanel(QWidget):
         self.context = context
 
         # ros node
-        self.ros_node = RosNode(context=self.context, status_signal=self.task_status_signal)
+        self.ros_node = RosNode(
+            context=self.context,
+            status_signal=self.task_status_signal,
+            selections_signal=self.selections_signal
+        )
         self.ros_node_thread = RosThread(context=self.context, node=self.ros_node)
         self.ros_node_thread.start()
 
@@ -161,12 +197,17 @@ class TaskPanel(QWidget):
         self.txt_sort_reason.setPlaceholderText("Final sorting reasoning...")
 
         # --- Detections box ---
-        self.lbl_detections = QLabel("No detections yet.")
-        self.lbl_detections.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.tbl_selections = QTableWidget()
+        self.tbl_selections.setColumnCount(4)
+        self.tbl_selections.setHorizontalHeaderLabels(["Object", "Color", "Bin Color", "Bin Side"])
+        self.tbl_selections.setAlternatingRowColors(True)
+        self.tbl_selections.setShowGrid(True)
+        # transparent background
+        self.tbl_selections.setStyleSheet("background: transparent;")
         self.brn_redo_detections = QPushButton("Redo Detections")
 
         v_detections = QVBoxLayout()
-        v_detections.addWidget(self.lbl_detections)
+        v_detections.addWidget(self.tbl_selections)
         v_detections.addWidget(self.brn_redo_detections, alignment=Qt.AlignmentFlag.AlignRight)
         detections_box = QGroupBox("Current Detections")
         detections_box.setLayout(v_detections)
@@ -225,6 +266,7 @@ class TaskPanel(QWidget):
         self.btn_continue.clicked.connect(self._continue_attempt)
         self.brn_redo_detections.clicked.connect(self._send_redo_detections)
         self.btn_start_sorting.clicked.connect(self._send_start_sorting)
+        self.selections_signal.connect(self._update_detections)
 
     def close(self):
         self.ros_node_thread.stop()
@@ -235,6 +277,41 @@ class TaskPanel(QWidget):
         self.lbl_state.setText(f"Task status: {self.ros_node.sorting_task_status.value}")
         if self.ros_node.sorting_task_status == TaskStatus.WAITING:
             self.btn_continue.setEnabled(True)
+
+    def _update_detections(self):
+        data = self.ros_node.selections
+        if not data:
+            self.tbl_selections.setRowCount(0)
+            return
+
+        self.tbl_selections.setRowCount(len(data))
+
+        for row, obj in enumerate(data):
+            object_class = obj.get("object_class", "unknown").title()
+            color_label  = obj.get("color_label", "unknown").title()
+            bin_info     = obj.get("bin", {})
+
+            bin_color = bin_info.get("color", "").title()
+            bin_side  = f"{bin_info.get('perspective','').title()} {bin_info.get('side','')}"
+
+            # object class
+            self.tbl_selections.setItem(row, 0, QTableWidgetItem(object_class))
+
+            # color label (background)
+            color_item = QTableWidgetItem(color_label)
+            color_hex = COLOR_MAP.get(color_label.lower(), "#FFFFFF")
+            color_item.setForeground(QtGui.QColor(color_hex))
+            self.tbl_selections.setItem(row, 1, color_item)
+
+            # bin color (background)
+            bin_color_item = QTableWidgetItem(bin_color)
+            bin_color_hex = COLOR_MAP.get(bin_color.lower(), "#FFFFFF")
+            bin_color_item.setForeground(QtGui.QColor(bin_color_hex))
+            self.tbl_selections.setItem(row, 2, bin_color_item)
+
+            # bin side
+            self.tbl_selections.setItem(row, 3, QTableWidgetItem(bin_side))
+
 
     def _row(self, *widgets):
         h = QHBoxLayout()
@@ -272,6 +349,9 @@ class TaskPanel(QWidget):
                 QMessageBox.warning(self, "Experiment", "Please select or create an experiment folder first.")
                 return
 
+            # Mark start
+            self.camera.mark_event("task_start")
+
             self.attempt_idx = 1
             self.attempts = []
             self.attempt_end_times = []
@@ -288,9 +368,6 @@ class TaskPanel(QWidget):
                 self.camera.start_recording()
             else:
                 QMessageBox.warning(self, "Camera", "Camera stream not available; skipping video recording.")
-
-            # Mark start
-            self.camera.mark_event("task_start")
 
         else:
             # --- END TASK ---
@@ -322,6 +399,11 @@ class TaskPanel(QWidget):
                 run_dir = self.exp.ensure_run()
                 self.exp.write_json(run_dir, "sorting_response.json", out)
 
+            # write the selections
+            if self.ros_node.selections:
+                run_dir = self.exp.ensure_run()
+                self.exp.write_json(run_dir, "sorting_selections.json", self.ros_node.selections)
+
             self._reset_attempt_fields()
             self._reset_sorting_fields()
             self.box_attempt.setTitle("Pick-Place Attempt #1")
@@ -334,7 +416,7 @@ class TaskPanel(QWidget):
         self.attempt_idx += 1
         self.lbl_state.setText(f"Attempt {self.attempt_idx} finished.")
         self.box_attempt.setTitle(f"Pick-Place Attempt #{self.attempt_idx}")
-        self.camera.mark_event(f"attempt_{self.attempt_idx}_end")
+        self.camera.mark_event(f"attempt_{self.attempt_idx - 1}_end")
 
         # record relative timestamp in seconds
         if self.camera.rec_start_monotonic:
@@ -355,7 +437,7 @@ class TaskPanel(QWidget):
             self.btn_continue.setEnabled(False)
             self.lbl_state.setText(f"Waiting for attempt {self.attempt_idx + 1}...")
             self._send_continue(self.attempt_idx + 1)
-            self.camera.mark_event(f"attempt_{self.attempt_idx + 1}_start")
+            self.camera.mark_event(f"attempt_{self.attempt_idx}_start")
             self.box_attempt.setTitle(f"Pick-Place Attempt #{self.attempt_idx + 1}")
         else:
             self.lbl_state.setText("All attempts done.")

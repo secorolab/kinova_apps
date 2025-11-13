@@ -122,10 +122,11 @@ class RecorderThread(threading.Thread):
 
 
 class RosTopicsPanel(QWidget):
-    def __init__(self, *, context, exp: ExperimentManager, parent=None):
+    def __init__(self, *, context, exp: ExperimentManager, parent=None, hide_topic_list: bool = False):
         super().__init__(parent)
         self.context = context
         self.exp = exp
+        self.hide_topic_list = hide_topic_list
 
         self.topics_list = QListWidget()
         self.topics_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
@@ -141,17 +142,18 @@ class RosTopicsPanel(QWidget):
 
         form = QFormLayout()
         form.addRow("Output dir:", self._row(self.output_dir_edit))
-        form.addRow(self.chk_all)
 
         btns = QHBoxLayout()
         btns.addWidget(self.refresh_btn)
         btns.addStretch(1)
+        btns.addWidget(self.chk_all)
         btns.addWidget(self.record_btn)
         btns.addWidget(self.stop_btn)
 
         box = QGroupBox("ROS 2 Topics")
         inner = QVBoxLayout()
-        inner.addWidget(self.topics_list, 1)
+        if not self.hide_topic_list:
+            inner.addWidget(self.topics_list, 1)
         inner.addLayout(form)
         inner.addLayout(btns)
         box.setLayout(inner)

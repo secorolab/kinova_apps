@@ -25,7 +25,7 @@ class MainWindow(QMainWindow):
         # Panels
         self.exp_panel = ExpertimentsPanel(self.exp)
         self.camera = CameraPanel(self.exp)
-        self.ros = RosTopicsPanel(context=context, exp=self.exp)
+        self.ros = RosTopicsPanel(context=context, exp=self.exp, hide_topic_list=True)
         self.task = TaskPanel(self.camera, self.exp, context=context)
 
         central = QWidget()
@@ -33,10 +33,10 @@ class MainWindow(QMainWindow):
 
         panels_h = QHBoxLayout()
         panels_h.addWidget(self.camera, 2)
-        panels_h.addWidget(self.ros, 2)
-
+        
         main_v.addWidget(self.exp_panel, 0)
         main_v.addLayout(panels_h)
+        main_v.addWidget(self.ros)
         main_v.addWidget(self.task, 0)
         self.setCentralWidget(central)
 

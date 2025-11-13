@@ -21,6 +21,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from example_interfaces.srv import Trigger
 
+import json
 import numpy as np
 import open3d as o3d
 from pydantic import BaseModel
@@ -64,6 +65,37 @@ PICK_Z_OFFSET = 0.015 + 0.05
 DEPTH_OFFSET_TRANSLATION = [-0.026, -0.0, 0.0]
 
 
+class BinConfig(BaseModel):
+    color: str
+    pose: list[float]
+    pose_ref: str = WORLD_FRAME
+    side: str
+    perspective: str
+
+
+
+class Bins:
+    RIGHT_BIN: BinConfig = BinConfig(
+                    color = 'blue',
+                    pose  = [ 0.43517, -0.25169, 0.94795, 0.62502, 0.78036, 0.015813, 0.012009],
+                    side  = 'right',
+                    perspective = 'robot'
+                    )
+    LEFT_BIN: BinConfig = BinConfig(
+                    color  = 'green',
+                    pose   = [-0.43517, -0.25169, 0.94795, 0.62502, 0.78036, 0.015813, 0.012009],
+                    side   = 'left',
+                    perspective = 'robot'
+                    )
+
+
+class Selections(BaseModel):
+    object_class: str
+    color_label: str
+    world_position: list[float]
+    bin: BinConfig
+
+
 class TaskStatus(StrEnum):
     NOT_STARTED = "not_started"
     WAITING     = "waiting"
@@ -94,15 +126,15 @@ class UserData(BaseModel):
     af: ActionFuture                      = ActionFuture()
     max_sort: int                         = 3
     num_sorted: int                       = 0
-    sort_data: list[ClusterInfo]          = []
+    sort_data: list[Selections]          = []
     target_position: list[float]          = []
     gripper_open: bool                    = True
-    target_objects: list[ClusterInfo]     = []
+    target_objects: list[Selections]     = []
     pick_object: bool                     = False
     place_object: bool                    = False
     detect_objects: bool                  = False
     started_experiment: bool              = False
-    current_object: Optional[ClusterInfo] = None
+    current_object: Optional[Selections] = None
     
     class Config:
         arbitrary_types_allowed = True
@@ -136,6 +168,7 @@ class SortObjects(Node):
         self.pc_cluster_pub       = self.create_publisher(PointCloud2, '/pc_cluster', 10)
         self.marker_pub           = self.create_publisher(MarkerArray, '/detected_objects', 10)
         self.obj_pose_pub         = self.create_publisher(PoseArray, '/detected_object_poses', 10)
+        self.selections_pub       = self.create_publisher(String, 'sorting_task/selections', 10)
         self.current_obj_pose_pub = self.create_publisher(PoseStamped, '/current_object_pose', 10)
 
         # action clients
@@ -175,7 +208,7 @@ class SortObjects(Node):
         self.exp_control_data = TaskControl(msg.data)
         self.logger.info(f'Received experiment control command: {self.exp_control_data}')
 
-    def detect_objects(self, target_objects: list[ClusterInfo]) -> bool:
+    def detect_objects(self, target_objects: list[Selections]) -> bool:
         ret = False
         pc_msg: Optional[PointCloud2] = None
  
@@ -257,16 +290,29 @@ class SortObjects(Node):
             self.logger.info(f'Not enough objects after filtering, found {len(filtered_clusters)}, need {NUM_OBJECTS}, skipping publishing')
             return True
 
+        selections: list[Selections] = []
+        bin_configs = [Bins.RIGHT_BIN, Bins.LEFT_BIN]
+        for i, cluster in enumerate(filtered_clusters):
+            bin_config = bin_configs[i % len(bin_configs)]
+            selection = Selections(
+                object_class   = cluster.object_class.value,
+                color_label    = cluster.color_label.value,
+                world_position = cluster.world_position,
+                bin            = bin_config
+            )
+            selections.append(selection)
+
         self.logger.info(f'Selections:')
-        for cluster in filtered_clusters:
-            world_position = cluster.world_position
+        for s in selections:
+            world_position = s.world_position
             assert len(world_position) == 3, "world_position must be a list of 3 floats"
             world_position[2] = base_transform.transform.translation.z + PICK_Z_OFFSET  # TODO: adjust for gripper height
-            self.logger.info(f'    {cluster.object_class} - {cluster.color_label:<6}: WPos: {[round(v, 3) for v in world_position]}')
+            self.logger.info(f'    {s.object_class} - {s.color_label:<6}: WPos: {[round(v, 3) for v in world_position]}')
+        self.selections_pub.publish(String(data=str(json.dumps([s.dict() for s in selections]))))
 
         # set target objects
         target_objects.clear()
-        target_objects.extend(filtered_clusters)
+        target_objects.extend(selections)
         self.logger.info(f'Set {len(target_objects)} target objects for sorting')
 
         plane_cloud = o3dpc_to_ros(plane_cloud, pc_header.frame_id, pc_header.stamp)
@@ -364,10 +410,19 @@ class SortObjects(Node):
         goal_msg.target_pose.pose.position.x = position[0]
         goal_msg.target_pose.pose.position.y = position[1]
         goal_msg.target_pose.pose.position.z = position[2]
-        goal_msg.target_pose.pose.orientation.x = 0.0
-        goal_msg.target_pose.pose.orientation.y = 0.0
-        goal_msg.target_pose.pose.orientation.z = 0.0
-        goal_msg.target_pose.pose.orientation.w = 1.0
+
+        if len(position) == 3:
+            goal_msg.target_pose.pose.orientation.x = 0.0
+            goal_msg.target_pose.pose.orientation.y = 0.0
+            goal_msg.target_pose.pose.orientation.z = 0.0
+            goal_msg.target_pose.pose.orientation.w = 1.0
+        elif len(position) == 7:
+            goal_msg.target_pose.pose.orientation.x = position[3]
+            goal_msg.target_pose.pose.orientation.y = position[4]
+            goal_msg.target_pose.pose.orientation.z = position[5]
+            goal_msg.target_pose.pose.orientation.w = position[6]
+        else:
+            raise ValueError("position must be a list of 3 (xyz) or 7 (xyz + quaternion) floats")
         goal_msg.target_pose.header.frame_id = WORLD_FRAME
         goal_msg.target_pose.header.stamp = self.get_clock().now().to_msg()
         
@@ -622,14 +677,13 @@ def move_arm_step(fsm: FSMData, ud: UserData, node: SortObjects):
         assert ud.current_object.world_position is not None, "current_object.world_position is None"
         if ud.pick_object:
             ud.target_position = ud.current_object.world_position
-            node.logger.info(f"Target position: {ud.target_position}")
-            node.logger.info(f"Moving arm to target position...")
+            node.logger.info(f"Moving arm to pick object...")
         if ud.place_object:
-            node.logger.warn("Placing position is not implemented, returning")
-            return True
+            bin_pose = ud.current_object.bin.pose
+            ud.target_position = bin_pose
+            node.logger.info(f"Moving arm to place object...")
         return False
         
-    assert len(ud.target_position) == 3, "target_position must be a list of 3 floats"
     if not node.move_arm(ud.af, ud.target_position):
         return False
     
@@ -658,7 +712,8 @@ def wait_step(fsm: FSMData, ud: UserData, node: SortObjects):
         node.exp_status_data = TaskStatus.IN_PROGRESS
         ud.started_experiment = True
         node.task_status_pub.publish(String(data=node.exp_status_data.value))
-        return True
+        produce_event(fsm.event_data, EventID.E_START_TASK)
+        return False
 
     if node.exp_control_data == TaskControl.REDO_DETECT:
         node.logger.info('Experiment control is redo_detect, redoing object detection')
