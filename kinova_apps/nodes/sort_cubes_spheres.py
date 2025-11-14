@@ -64,6 +64,14 @@ PICK_Z_OFFSET = 0.015 + 0.05
 # we need to apply this translation to correct EE pose after pose estimation
 DEPTH_OFFSET_TRANSLATION = [-0.026, -0.0, 0.0]
 
+# intermediate waypoints between pick and place
+# detect -> waypoint -> pick -> waypoint -> place -> waypoint -> pick ...
+PICK_PLACE_WAYPOINTS = [
+    
+]
+
+assert len(PICK_PLACE_WAYPOINTS) != 0, "PICK_PLACE_WAYPOINTS cannot be empty"
+
 
 class BinConfig(BaseModel):
     color: str
@@ -73,7 +81,7 @@ class BinConfig(BaseModel):
     perspective: str
 
 
-
+# TODO: change the orientation for left and right to face outwards
 class Bins:
     RIGHT_BIN: BinConfig = BinConfig(
                     color = 'blue',
@@ -126,15 +134,15 @@ class UserData(BaseModel):
     af: ActionFuture                      = ActionFuture()
     max_sort: int                         = 3
     num_sorted: int                       = 0
-    sort_data: list[Selections]          = []
-    target_position: list[float]          = []
+    sort_data: list[Selections]           = []
+    target_waypoints: list[list[float]]   = []
     gripper_open: bool                    = True
-    target_objects: list[Selections]     = []
+    target_objects: list[Selections]      = []
     pick_object: bool                     = False
     place_object: bool                    = False
     detect_objects: bool                  = False
     started_experiment: bool              = False
-    current_object: Optional[Selections] = None
+    current_object: Optional[Selections]  = None
     
     class Config:
         arbitrary_types_allowed = True
@@ -405,27 +413,38 @@ class SortObjects(Node):
 
         return True
 
-    def get_move_arm_msg(self, position: list[float]):
+    def get_move_arm_msg(self, waypoints: list[list[float]]) -> MoveToCartesianPose.Goal:
+        '''
+        waypoints: list of waypoints
+                    each waypoint is a list of 3 (xyz) or 7 (xyz + quaternion) floats
+        '''
         goal_msg = MoveToCartesianPose.Goal()
-        goal_msg.target_pose.pose.position.x = position[0]
-        goal_msg.target_pose.pose.position.y = position[1]
-        goal_msg.target_pose.pose.position.z = position[2]
+        now = self.get_clock().now().to_msg()
 
-        if len(position) == 3:
-            goal_msg.target_pose.pose.orientation.x = 0.0
-            goal_msg.target_pose.pose.orientation.y = 0.0
-            goal_msg.target_pose.pose.orientation.z = 0.0
-            goal_msg.target_pose.pose.orientation.w = 1.0
-        elif len(position) == 7:
-            goal_msg.target_pose.pose.orientation.x = position[3]
-            goal_msg.target_pose.pose.orientation.y = position[4]
-            goal_msg.target_pose.pose.orientation.z = position[5]
-            goal_msg.target_pose.pose.orientation.w = position[6]
-        else:
-            raise ValueError("position must be a list of 3 (xyz) or 7 (xyz + quaternion) floats")
-        goal_msg.target_pose.header.frame_id = WORLD_FRAME
-        goal_msg.target_pose.header.stamp = self.get_clock().now().to_msg()
-        
+        for wp in waypoints:
+            if len(wp) not in [3, 7]:
+                raise ValueError("each waypoint must be a list of 3 (xyz) or 7 (xyz + quaternion) floats")
+
+            pose_stamped = PoseStamped()
+            pose_stamped.header.frame_id = WORLD_FRAME
+            pose_stamped.header.stamp = now
+            pose_stamped.pose.position.x = wp[0]
+            pose_stamped.pose.position.y = wp[1]
+            pose_stamped.pose.position.z = wp[2]
+
+            if len(wp) == 3:
+                pose_stamped.pose.orientation.x = 0.0
+                pose_stamped.pose.orientation.y = 0.0
+                pose_stamped.pose.orientation.z = 0.0
+                pose_stamped.pose.orientation.w = 1.0
+            elif len(wp) == 7:
+                pose_stamped.pose.orientation.x = wp[3]
+                pose_stamped.pose.orientation.y = wp[4]
+                pose_stamped.pose.orientation.z = wp[5]
+                pose_stamped.pose.orientation.w = wp[6]
+
+            goal_msg.waypoints.append(pose_stamped)
+
         return goal_msg
 
     def get_gripper_cmd_msg(self, position: float):
@@ -500,8 +519,8 @@ class SortObjects(Node):
         af.get_result_future = None
         af.goal_handle = None
 
-    def move_arm(self, af: ActionFuture, target_position: list[float]):
-        move_arm_msg = self.get_move_arm_msg(target_position)
+    def move_arm(self, af: ActionFuture, waypoints: list[list[float]]):
+        move_arm_msg = self.get_move_arm_msg(waypoints)
         # send goal to arm
         if not self.execute_action(self.move_to_pose_ac, af, move_arm_msg):
             return False
@@ -676,18 +695,20 @@ def move_arm_step(fsm: FSMData, ud: UserData, node: SortObjects):
         assert ud.current_object is not None, "current_object is None"
         assert ud.current_object.world_position is not None, "current_object.world_position is None"
         if ud.pick_object:
-            ud.target_position = ud.current_object.world_position
+            ud.target_waypoints = [ud.current_object.world_position]
             node.logger.info(f"Moving arm to pick object...")
         if ud.place_object:
             bin_pose = ud.current_object.bin.pose
-            ud.target_position = bin_pose
+            ud.target_waypoints = [bin_pose]
             node.logger.info(f"Moving arm to place object...")
+        # prepend intermediate waypoints to target waypoints
+        ud.target_waypoints = PICK_PLACE_WAYPOINTS + ud.target_waypoints
         return False
         
-    if not node.move_arm(ud.af, ud.target_position):
+    if not node.move_arm(ud.af, ud.target_waypoints):
         return False
     
-    ud.target_position = []
+    ud.target_waypoints = []
     return True
 
 def gripper_control_step(fsm: FSMData, ud: UserData, node: SortObjects):
